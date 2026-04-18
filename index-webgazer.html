@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WebGazer demo</title>
+<style>
+  :root {
+    --bg: #f4f3ef;
+    --panel: rgba(255,255,255,0.85);
+    --text: #1a1a1a;
+    --muted: #8a8a86;
+    --hairline: rgba(0,0,0,0.08);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  #intro {
+    position: fixed; top: 24px; left: 50%;
+    transform: translateX(-50%);
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 16px 20px;
+    max-width: 560px;
+    z-index: 20;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  #intro h1 { margin: 0 0 6px 0; font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
+  #intro p { margin: 4px 0; font-size: 12px; color: var(--muted); line-height: 1.45; }
+  #intro kbd {
+    font-family: ui-monospace, Menlo, monospace;
+    background: rgba(0,0,0,0.05);
+    padding: 1px 6px; border-radius: 4px;
+    font-size: 11px;
+  }
+
+  #hud {
+    position: fixed; top: 24px; right: 24px;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    z-index: 20;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  #hud .row { display: flex; justify-content: space-between; gap: 16px; }
+  #hud .label { color: var(--muted); }
+
+  /* WebGazer's own video + face-overlay appears bottom-left; leave alone */
+
+  .dots { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  .dot {
+    position: absolute;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: rgba(0,0,0,0.35);
+    border: 1px solid rgba(0,0,0,0.5);
+    transform: translate(-50%, -50%);
+    cursor: pointer;
+    pointer-events: auto;
+  }
+  .dot:hover { background: rgba(0,0,0,0.6); }
+  .dot.done { background: rgba(40,160,40,0.6); border-color: rgba(40,160,40,0.9); }
+
+  #clear-calib {
+    position: fixed; bottom: 24px; left: 24px; z-index: 20;
+    background: white; border: 1px solid var(--hairline);
+    border-radius: 8px; padding: 8px 12px;
+    font: inherit; font-size: 12px; cursor: pointer;
+  }
+  #clear-calib:hover { background: #fafafa; }
+
+  #loading {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg); z-index: 100;
+    font-size: 13px; color: var(--muted);
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">starting WebGazer…</div>
+
+<div id="intro" hidden>
+  <h1>WebGazer demo</h1>
+  <p>
+    This is an unmodified build of
+    <a href="https://github.com/brownhci/WebGazer" target="_blank">WebGazer</a>
+    — ridge regression on 60×60 grayscale eye patches, self-calibrated from
+    your clicks. No head-pose correction.
+  </p>
+  <p>
+    Click each of the 9 calibration dots a few times while looking directly
+    at them. Then look around — the red marker WebGazer draws is its gaze
+    prediction. Keep clicking around the page to keep it learning.
+    Press <kbd>h</kbd> to show/hide this panel.
+  </p>
+</div>
+
+<div id="hud" hidden>
+  <div class="row"><span class="label">gaze x</span><span id="hud-x">—</span></div>
+  <div class="row"><span class="label">gaze y</span><span id="hud-y">—</span></div>
+  <div class="row"><span class="label">clicks</span><span id="hud-clicks">0</span></div>
+</div>
+
+<div class="dots" id="calib-dots"></div>
+
+<button id="clear-calib" hidden>Reset calibration</button>
+
+<script src="vendor/webgazer/webgazer.js"></script>
+<script>
+  const loading = document.getElementById("loading");
+  const intro   = document.getElementById("intro");
+  const hud     = document.getElementById("hud");
+  const hudX    = document.getElementById("hud-x");
+  const hudY    = document.getElementById("hud-y");
+  const hudN    = document.getElementById("hud-clicks");
+  const dotsEl  = document.getElementById("calib-dots");
+  const clearBtn = document.getElementById("clear-calib");
+
+  // 9-point calibration dots — each must be clicked 5 times (WebGazer's convention)
+  const CLICKS_PER_DOT = 5;
+  const POINTS = [
+    [0.1, 0.1], [0.5, 0.1], [0.9, 0.1],
+    [0.1, 0.5], [0.5, 0.5], [0.9, 0.5],
+    [0.1, 0.9], [0.5, 0.9], [0.9, 0.9],
+  ];
+  let clickCount = 0;
+
+  function makeDots() {
+    dotsEl.innerHTML = "";
+    POINTS.forEach(([fx, fy], i) => {
+      const d = document.createElement("div");
+      d.className = "dot";
+      d.style.left = (fx * 100) + "%";
+      d.style.top  = (fy * 100) + "%";
+      d.dataset.hits = "0";
+      d.addEventListener("click", (e) => {
+        const hits = parseInt(d.dataset.hits || "0") + 1;
+        d.dataset.hits = String(hits);
+        if (hits >= CLICKS_PER_DOT) {
+          d.classList.add("done");
+          d.style.pointerEvents = "none";
+        }
+        e.stopPropagation();
+      });
+      dotsEl.appendChild(d);
+    });
+  }
+
+  document.addEventListener("click", () => {
+    clickCount++;
+    hudN.textContent = clickCount;
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "h" || e.key === "H") {
+      intro.hidden = !intro.hidden;
+    }
+  });
+
+  clearBtn.addEventListener("click", () => {
+    if (!confirm("Clear WebGazer's calibration data?")) return;
+    webgazer.clearData();
+    makeDots();
+    clickCount = 0;
+    hudN.textContent = 0;
+  });
+
+  // Start WebGazer
+  webgazer
+    .setRegression("ridge")
+    .setTracker("TFFacemesh")
+    .setGazeListener((data) => {
+      if (!data) return;
+      hudX.textContent = data.x.toFixed(0);
+      hudY.textContent = data.y.toFixed(0);
+    })
+    .begin()
+    .then(() => {
+      webgazer.showVideoPreview(true);
+      webgazer.showPredictionPoints(true);
+      makeDots();
+      loading.remove();
+      intro.hidden = false;
+      hud.hidden = false;
+      clearBtn.hidden = false;
+    })
+    .catch((err) => {
+      loading.textContent = "WebGazer failed to start: " + err.message;
+    });
+</script>
+</body>
+</html>
