@@ -87,6 +87,19 @@
     background: var(--bg); z-index: 100;
     font-size: 13px; color: var(--muted);
   }
+
+  /* Smoothed gaze marker we draw on top of WebGazer's raw red dot */
+  #smooth-dot {
+    position: fixed;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: rgba(26,26,26,0.2);
+    border: 2px solid #1a1a1a;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 6;
+    display: none;
+  }
 </style>
 </head>
 <body>
@@ -113,7 +126,19 @@
   <div class="row"><span class="label">gaze x</span><span id="hud-x">—</span></div>
   <div class="row"><span class="label">gaze y</span><span id="hud-y">—</span></div>
   <div class="row"><span class="label">clicks</span><span id="hud-clicks">0</span></div>
+  <div class="row" style="margin-top:8px;gap:8px;align-items:center;">
+    <span class="label">smooth</span>
+    <input id="smooth-slider" type="range" min="0" max="0.97" step="0.01" value="0.85"
+           style="flex:1;accent-color:#1a1a1a;" />
+    <span id="smooth-val" style="min-width:32px;text-align:right;">0.85</span>
+  </div>
+  <div class="row" style="gap:8px;align-items:center;">
+    <span class="label">show raw</span>
+    <input id="show-raw" type="checkbox" checked style="accent-color:#1a1a1a;" />
+  </div>
 </div>
+
+<div id="smooth-dot"></div>
 
 <div class="dots" id="calib-dots"></div>
 
@@ -179,17 +204,41 @@
     hudN.textContent = 0;
   });
 
-  // Start WebGazer
-  // Use TensorFlow.js face-mesh tracker (TFFaceMesh). The default tracker
-  // would be MediaPipe's FaceMesh which needs local .binarypb + wasm assets
-  // next to webgazer.js that we haven't vendored.
+  // --- Smoothing on top of WebGazer ---
+  // Exponential moving average: smoothedX += (1 - smooth) * (rawX - smoothedX)
+  // Higher smooth = steadier but more lag. 0.85 feels good as a default.
+  let smooth = parseFloat(document.getElementById("smooth-slider").value);
+  let smoothedX = null, smoothedY = null;
+  const smoothDot = document.getElementById("smooth-dot");
+  const smoothVal = document.getElementById("smooth-val");
+  const showRaw = document.getElementById("show-raw");
+
+  document.getElementById("smooth-slider").addEventListener("input", (e) => {
+    smooth = parseFloat(e.target.value);
+    smoothVal.textContent = smooth.toFixed(2);
+  });
+  showRaw.addEventListener("change", (e) => {
+    try { webgazer.showPredictionPoints(e.target.checked); } catch (err) {}
+  });
+
+  // Start WebGazer. TFFacemesh tracker (TensorFlow.js); the default
+  // MediaPipe FaceMesh tracker loads .binarypb + wasm from ./mediapipe/.
   webgazer.setTracker("TFFacemesh");
   webgazer.setGazeListener((data, elapsedTime) => {
     if (!data) return;
-    hudX.textContent = data.x.toFixed(0);
-    hudY.textContent = data.y.toFixed(0);
+    const alpha = 1 - smooth;
+    if (smoothedX === null) { smoothedX = data.x; smoothedY = data.y; }
+    else {
+      smoothedX += alpha * (data.x - smoothedX);
+      smoothedY += alpha * (data.y - smoothedY);
+    }
+    smoothDot.style.left = smoothedX + "px";
+    smoothDot.style.top  = smoothedY + "px";
+    smoothDot.style.display = "block";
+    hudX.textContent = smoothedX.toFixed(0);
+    hudY.textContent = smoothedY.toFixed(0);
   }).begin().then(() => {
-    try { webgazer.showPredictionPoints(true); } catch (e) { console.warn(e); }
+    try { webgazer.showPredictionPoints(showRaw.checked); } catch (e) { console.warn(e); }
     makeDots();
     loading.remove();
     intro.hidden = false;
