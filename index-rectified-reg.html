@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Rectified + pose gaze regression</title>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+<style>
+  :root {
+    --bg: #f4f3ef;
+    --panel: rgba(255,255,255,0.85);
+    --text: #1a1a1a;
+    --muted: #8a8a86;
+    --hairline: rgba(0,0,0,0.08);
+    --ours: #111;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  #loading {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg); z-index: 100;
+    font-size: 13px; color: var(--muted);
+  }
+
+  /* Small PiP camera + rectified patches, top-left */
+  .pip {
+    position: fixed; top: 16px; left: 16px;
+    z-index: 15;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 10px;
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 10px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .pip video {
+    width: 180px; height: 120px;
+    object-fit: cover; border-radius: 6px;
+    transform: scaleX(-1);
+    background: #111;
+  }
+  .pip .patches {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 8px;
+    align-content: center;
+  }
+  .pip .patches canvas {
+    width: 80px; height: 40px;
+    image-rendering: pixelated;
+    background: #000; border-radius: 4px;
+    display: block;
+  }
+  .pip .patches canvas.old { outline: 2px solid #6aa3ff; outline-offset: 1px; }
+  .pip .patches canvas.new { outline: 2px solid #ff5a3a; outline-offset: 1px; }
+  .pip .patches .lbl {
+    font-size: 10px; color: var(--muted);
+    letter-spacing: 0.04em; text-transform: uppercase;
+    grid-column: 1 / 3;
+    margin-top: 2px;
+  }
+  .pip .patches .lbl:first-child { margin-top: 0; }
+
+  /* Control panel, top-right */
+  .controls {
+    position: fixed; top: 16px; right: 16px;
+    z-index: 15;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 14px;
+    width: 280px;
+    font-size: 12px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+  }
+  .controls h1 { margin: 0 0 8px 0; font-size: 13px; font-weight: 600; letter-spacing: 0.01em; }
+  .controls h2 { margin: 10px 0 4px 0; font-size: 11px; font-weight: 600; text-transform: uppercase;
+                 color: var(--muted); letter-spacing: 0.06em; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 4px 0; }
+  .row .label { color: var(--muted); }
+  .row .val { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+  .controls button, .controls select {
+    font: inherit; font-size: 11px; cursor: pointer;
+    border: 1px solid var(--hairline);
+    border-radius: 6px; padding: 4px 8px;
+    background: white; color: var(--text);
+  }
+  .controls button.primary { background: var(--text); color: #fff; border-color: transparent; }
+  .controls button.wide { width: 100%; padding: 6px 8px; }
+  .controls input[type="range"] { width: 100%; accent-color: var(--text); }
+  .controls input[type="checkbox"] { accent-color: var(--text); }
+  .hint { font-size: 11px; color: var(--muted); line-height: 1.45; margin: 4px 0; }
+
+  /* Live prediction marker */
+  .gaze-marker {
+    position: fixed; width: 22px; height: 22px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 5;
+    display: none;
+    transition: left 90ms linear, top 90ms linear;
+    border: 2px solid var(--ours);
+    background: rgba(0,0,0,0.12);
+  }
+  .gaze-marker.visible { display: block; }
+
+  /* Calibration grid — 4x3 click targets */
+  #calib-grid { position: fixed; inset: 0; z-index: 4; pointer-events: none; }
+  .calib-dot {
+    position: absolute;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: rgba(0,0,0,0.35);
+    border: 1px solid rgba(0,0,0,0.55);
+    transform: translate(-50%, -50%);
+    cursor: crosshair;
+    pointer-events: auto;
+    transition: background-color 160ms, transform 160ms;
+  }
+  .calib-dot:hover { transform: translate(-50%, -50%) scale(1.2); }
+  .calib-dot.done { background: rgba(40,160,40,0.6); border-color: rgba(40,160,40,0.9); }
+
+  .click-anywhere {
+    position: fixed; left: 50%; bottom: 16px;
+    transform: translateX(-50%);
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 8px; padding: 6px 12px;
+    font-size: 11px; color: var(--muted);
+    z-index: 15;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+
+  /* Head point-cloud — fills the viewport behind the UI as a watermark */
+  .headviz {
+    position: fixed; inset: 0;
+    z-index: 2;
+    pointer-events: none;
+  }
+  .headviz canvas {
+    display: block;
+    width: 100%; height: 100%;
+    background: transparent;
+  }
+
+  /* Red lasers from each iris to the live gaze prediction */
+  .laser {
+    position: fixed;
+    left: 0; top: 0;
+    height: 4px;
+    background: linear-gradient(90deg,
+      rgba(255,40,40,0) 0%,
+      rgba(255,90,90,0.98) 12%,
+      rgba(255,20,20,1) 50%,
+      rgba(255,90,90,0.98) 88%,
+      rgba(255,40,40,0) 100%);
+    box-shadow: 0 0 10px #ff2020, 0 0 24px rgba(255,40,40,0.55);
+    transform-origin: 0 50%;
+    pointer-events: none;
+    z-index: 3;
+    opacity: 0;
+    border-radius: 2px;
+    will-change: transform, width, opacity;
+  }
+  .laser.on { opacity: 0.95; }
+</style>
+</head>
+<body>
+
+<div id="loading">loading MediaPipe…</div>
+
+<!-- Camera + rectified patches -->
+<div class="pip">
+  <video id="webcam" autoplay playsinline muted></video>
+  <div class="patches">
+    <div class="lbl">old (axis-aligned) · reference</div>
+    <canvas class="old" id="old-patch-left"  width="40" height="20"></canvas>
+    <canvas class="old" id="old-patch-right" width="40" height="20"></canvas>
+    <div class="lbl">new (rectified) · features</div>
+    <canvas class="new" id="patch-left"  width="40" height="20"></canvas>
+    <canvas class="new" id="patch-right" width="40" height="20"></canvas>
+  </div>
+</div>
+
+<!-- Controls -->
+<aside class="controls">
+  <h1>Rectified + pose gaze</h1>
+  <div class="hint">
+    Click the dots (or anywhere) while looking at them. After ~15 samples
+    a dark ring shows the gaze prediction from the rectified + head-pose
+    ridge regression.
+  </div>
+
+  <h2>Samples</h2>
+  <div class="row"><span class="label">Collected</span><span class="val" id="n-samples">0</span></div>
+  <div class="row">
+    <button id="btn-clear">Clear samples</button>
+    <button id="btn-refit" class="primary">Refit</button>
+  </div>
+
+  <h2>Features</h2>
+  <div class="row">
+    <label><input type="checkbox" id="use-pose" checked /> Include pose (yaw/pitch/roll)</label>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="show-lasers" checked /> Laser to gaze</label>
+  </div>
+  <div class="row">
+    <span class="label">Pose weight</span><span class="val" id="pose-scale-val">1.0</span>
+  </div>
+  <input type="range" id="pose-scale" min="0" max="5" step="0.1" value="1.0" />
+  <div class="hint">
+    Multiplier on the normalized pose features. Higher = pose matters more
+    in the regression (compensates for ridge's L2 drowning them).
+  </div>
+
+  <h2>Regression</h2>
+  <div class="row">
+    <span class="label">λ (ridge)</span><span class="val" id="lambda-val">0.50</span>
+  </div>
+  <input type="range" id="lambda" min="-3" max="3" step="0.1" value="-0.3" />
+  <div class="hint">Log-scale: slider value s means λ = 10<sup>s</sup>.</div>
+
+  <h2>Eval (online — predict before train)</h2>
+  <div class="row">
+    <span class="label">streaming RMSE</span>
+    <span class="val" id="stream-ours">—</span>
+  </div>
+  <div class="row"><span class="label">samples scored</span><span class="val" id="stream-n-ours">0</span></div>
+  <div class="hint">
+    Before each click is used for training, we ask the model what it
+    would have predicted there. Average error over those predictions →
+    px RMSE. No leakage — never trains on a sample it's been asked
+    about.
+  </div>
+
+  <h2>Error heatmap · yaw × pitch</h2>
+  <canvas id="heatmap-ours" width="180" height="180"
+          style="width:100%;height:auto;display:block;border-radius:4px;image-rendering:pixelated;margin-top:4px;"></canvas>
+  <div class="hint">
+    X axis: yaw (turn head left ↔ right).
+    Y axis: pitch (tilt up ↕ down).
+    Green = low error, red = high.
+    Gray cells have no samples yet — move your head around while
+    clicking to fill them.
+  </div>
+
+  <h2>Train error (diagnostic)</h2>
+  <div class="row">
+    <span class="label">ours (train)</span>
+    <span class="val" id="mse-ours">—</span>
+  </div>
+  <div class="hint">
+    Fit error on the samples we trained on. Keep close to the online
+    number — if it's much lower, we're overfitting (raise λ).
+  </div>
+
+  <h2>Head pose</h2>
+  <div class="row"><span class="label">yaw</span>  <span class="val" id="yaw">—</span></div>
+  <div class="row"><span class="label">pitch</span><span class="val" id="pitch">—</span></div>
+  <div class="row"><span class="label">roll</span> <span class="val" id="roll">—</span></div>
+
+</aside>
+
+<!-- Calibration dots -->
+<div id="calib-grid"></div>
+
+<!-- Gaze marker -->
+<div class="gaze-marker ours" id="marker-ours"></div>
+
+<div class="click-anywhere">Click anywhere to add a calibration sample</div>
+
+<!-- Head point-cloud watermark (fullscreen, behind UI) -->
+<div class="headviz">
+  <canvas id="headviz-canvas"></canvas>
+</div>
+
+<!-- Red lasers from each eye to the current gaze prediction -->
+<div class="laser" id="laser-l"></div>
+<div class="laser" id="laser-r"></div>
+
+<script type="module">
+import * as THREE from "three";
+import {
+  FaceLandmarker,
+  FilesetResolver,
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9";
+
+// ============================================================
+// DOM
+// ============================================================
+const video    = document.getElementById("webcam");
+const loading  = document.getElementById("loading");
+const patchL   = document.getElementById("patch-left");
+const patchR   = document.getElementById("patch-right");
+const pLctx    = patchL.getContext("2d", { willReadFrequently: true });
+const pRctx    = patchR.getContext("2d", { willReadFrequently: true });
+const oldPatchL = document.getElementById("old-patch-left");
+const oldPatchR = document.getElementById("old-patch-right");
+const oLctx     = oldPatchL.getContext("2d");
+const oRctx     = oldPatchR.getContext("2d");
+const markerOurs = document.getElementById("marker-ours");
+const calibGrid  = document.getElementById("calib-grid");
+
+// ============================================================
+// Feature dimensions
+// ============================================================
+const PATCH_W = 40, PATCH_H = 20;         // per-eye feature grid
+const PIXEL_DIMS_PER_EYE = PATCH_W * PATCH_H;  // 800
+const TOTAL_PIXEL_DIMS   = PIXEL_DIMS_PER_EYE * 2; // 1600
+const POSE_DIMS          = 3;
+const D_WITH_POSE        = TOTAL_PIXEL_DIMS + POSE_DIMS + 1; // + bias
+const D_NO_POSE          = TOTAL_PIXEL_DIMS + 1;
+
+// ============================================================
+// Eye landmark indices (MediaPipe face mesh)
+// ============================================================
+const LEFT_IDX  = { outer: 33,  inner: 133, top: 159, bot: 145, pupil: 468 };
+const RIGHT_IDX = { inner: 362, outer: 263, top: 386, bot: 374, pupil: 473 };
+
+// ============================================================
+// State
+// ============================================================
+let faceLandmarker = null;
+let lastTime = -1;
+
+// Current per-frame features (rebuilt every face tick)
+let curFeat = null;         // Float32Array of length D_WITH_POSE or D_NO_POSE
+let curPose = null;         // {yaw, pitch, roll} in radians
+
+// Training samples (rows = samples, each row is a Float32Array of length D)
+const samples = {
+  X: [],        // feature rows
+  ys: [],       // screen_x targets
+  yt: [],       // screen_y targets
+  clicks: [],   // {x, y} for rendering as done-dots
+};
+
+// Fitted weights
+let wx = null, wy = null; // Float32Array(D)
+
+// ---- Online evaluation state ----
+// For every click, before training on it, log each model's live prediction
+// and the current yaw/pitch. That gives us a fair, held-out-per-sample
+// metric for both models on identical data.
+const BINS = 5;
+const YAW_HALF   = 40 * Math.PI / 180;  // ±40°
+const PITCH_HALF = 30 * Math.PI / 180;  // ±30°
+
+function makeBins() {
+  const b = new Array(BINS * BINS);
+  for (let i = 0; i < b.length; i++) b[i] = { sum: 0, n: 0 };
+  return b;
+}
+const evalS = {
+  streamOurs: { sum: 0, n: 0 },
+  binsOurs: makeBins(),
+};
+function binIdx(yaw, pitch) {
+  const fx = Math.max(0, Math.min(0.9999, (yaw   + YAW_HALF)   / (2 * YAW_HALF)));
+  const fy = Math.max(0, Math.min(0.9999, (pitch + PITCH_HALF) / (2 * PITCH_HALF)));
+  return Math.floor(fy * BINS) * BINS + Math.floor(fx * BINS);
+}
+function resetEval() {
+  evalS.streamOurs = { sum: 0, n: 0 };
+  evalS.binsOurs   = makeBins();
+  refreshEvalUI();
+}
+function refreshEvalUI() {
+  const so = evalS.streamOurs;
+  document.getElementById("stream-ours").textContent = so.n ? (so.sum / so.n).toFixed(0) + " px" : "—";
+  document.getElementById("stream-n-ours").textContent = so.n;
+  drawHeatmap(document.getElementById("heatmap-ours"), evalS.binsOurs);
+}
+function drawHeatmap(canvas, bins) {
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  const cw = W / BINS, ch = H / BINS;
+  // Shared scale across the whole heatmap.
+  let maxErr = 1;
+  for (const b of evalS.binsOurs) if (b.n) maxErr = Math.max(maxErr, b.sum / b.n);
+  for (let y = 0; y < BINS; y++) {
+    for (let x = 0; x < BINS; x++) {
+      // Flip y so screen-up = heatmap-top (pitch up/down feels natural)
+      const b = bins[(BINS - 1 - y) * BINS + x];
+      if (!b.n) {
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+      } else {
+        const t = Math.min(1, (b.sum / b.n) / maxErr);
+        const hue = (1 - t) * 135;            // 135 green → 0 red
+        const light = 45 + (1 - t) * 10;
+        ctx.fillStyle = `hsl(${hue.toFixed(0)}, 70%, ${light.toFixed(0)}%)`;
+      }
+      ctx.fillRect(x * cw, y * ch, cw - 1, ch - 1);
+    }
+  }
+}
+
+// UI knobs
+let usePose = true;
+let poseScale = 1.0;
+let lambda = Math.pow(10, -0.3);
+
+// ============================================================
+// Head point-cloud watermark (THREE.js) — dense stippled face
+// ported from index-v2.html, rendered at fullscreen behind the UI.
+// ============================================================
+const headViz = {
+  renderer: null,
+  scene: null,
+  camera: null,
+  facePoints: null,
+  irisRingPoints: null,
+  pupilPoints: null,
+  faceDefs: null,
+  irisDefs: null,
+  pupilDefs: null,
+  eyeScreenL: null,    // {x, y} — page coords of left pupil
+  eyeScreenR: null,
+  tmpVec: null,
+  initialized: false,
+};
+
+// ----- v2-style sample builders (slightly reduced density for perf) -----
+function rand(r) { return (Math.random() - 0.5) * 2 * r; }
+const IRIS_RING_LANDMARKS  = new Set([469, 470, 471, 472, 474, 475, 476, 477]);
+const IRIS_PUPIL_LANDMARKS = new Set([468, 473]);
+const ALL_IRIS_LANDMARKS   = new Set([...IRIS_RING_LANDMARKS, ...IRIS_PUPIL_LANDMARKS]);
+
+// ---- v2 densities (unchanged) ----
+function buildFaceSampleDefs() {
+  const defs = [];
+  const N_LM = 478;
+  const contourSets = [
+    FaceLandmarker.FACE_LANDMARKS_FACE_OVAL,
+    FaceLandmarker.FACE_LANDMARKS_LEFT_EYE,
+    FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE,
+    FaceLandmarker.FACE_LANDMARKS_LEFT_EYEBROW,
+    FaceLandmarker.FACE_LANDMARKS_RIGHT_EYEBROW,
+    FaceLandmarker.FACE_LANDMARKS_LIPS,
+  ];
+  const contourLM = new Set();
+  for (const set of contourSets) for (const e of set) { contourLM.add(e.start); contourLM.add(e.end); }
+
+  for (let i = 0; i < N_LM; i++) {
+    if (ALL_IRIS_LANDMARKS.has(i)) continue;
+    const isContour = contourLM.has(i);
+    const N  = isContour ? 350 : 60;
+    const r0 = isContour ? 0.010 : 0.007;
+    for (let n = 0; n < N; n++) {
+      defs.push({ type: "point", idx: i, ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
+    }
+  }
+  for (const e of FaceLandmarker.FACE_LANDMARKS_TESSELATION) {
+    if (ALL_IRIS_LANDMARKS.has(e.start) || ALL_IRIS_LANDMARKS.has(e.end)) continue;
+    const N = 55, r0 = 0.005;
+    for (let n = 0; n < N; n++) {
+      defs.push({ type: "edge", a: e.start, b: e.end, t: Math.random(),
+                  ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
+    }
+  }
+  for (const set of contourSets) {
+    for (const e of set) {
+      const N = 250, r0 = 0.0025;
+      for (let n = 0; n < N; n++) {
+        defs.push({ type: "edge", a: e.start, b: e.end, t: Math.random(),
+                    ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
+      }
+    }
+  }
+  return defs;
+}
+function buildIrisRingDefs() {
+  const defs = [];
+  const N_PER_EYE = 1800, INNER = 0.40, OUTER = 1.10;
+  for (const side of ["left", "right"]) {
+    for (let n = 0; n < N_PER_EYE; n++) {
+      const u = Math.random();
+      let rNorm = Math.sqrt(INNER*INNER + u * (OUTER*OUTER - INNER*INNER));
+      rNorm += (Math.random() - 0.5) * 0.18;
+      defs.push({ side, angle: Math.random() * Math.PI * 2, rNorm,
+                  ox: rand(0.0028), oy: rand(0.0028), oz: rand(0.001) });
+    }
+  }
+  return defs;
+}
+function buildPupilDefs() {
+  const defs = [];
+  const N_PER_EYE = 700, PUPIL_FRAC = 0.42;
+  for (const side of ["left", "right"]) {
+    for (let n = 0; n < N_PER_EYE; n++) {
+      const u = Math.random();
+      let rNorm = Math.sqrt(u) * PUPIL_FRAC;
+      rNorm += (Math.random() - 0.5) * 0.10;
+      if (rNorm < 0) rNorm = -rNorm;
+      defs.push({ side, angle: Math.random() * Math.PI * 2, rNorm,
+                  ox: rand(0.0018), oy: rand(0.0018), oz: rand(0.001) });
+    }
+  }
+  return defs;
+}
+
+function makePointsBuffer(count) {
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+  return geom;
+}
+
+// Laser line DOM refs — origin is each pupil's projected screen position,
+// tip is our model's current predicted gaze.
+const laserElL = document.getElementById("laser-l");
+const laserElR = document.getElementById("laser-r");
+function positionLaser(el, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  const ang = Math.atan2(dy, dx);
+  el.style.transform = `translate(${x1}px, ${y1}px) rotate(${ang}rad)`;
+  el.style.width = len + "px";
+}
+let showLasers = true;
+document.addEventListener("DOMContentLoaded", () => {
+  const el = document.getElementById("show-lasers");
+  if (el) el.addEventListener("change", (e) => { showLasers = e.target.checked; });
+});
+function updateLasers() {
+  if (!showLasers) { laserElL.classList.remove("on"); laserElR.classList.remove("on"); return; }
+  const eL = headViz.eyeScreenL, eR = headViz.eyeScreenR;
+  if (!eL || !eR) { laserElL.classList.remove("on"); laserElR.classList.remove("on"); return; }
+  let tx = null, ty = null;
+  if (wx && wy && curFeat) {
+    tx = dot(curFeat, wx);
+    ty = dot(curFeat, wy);
+  }
+  if (tx === null) { laserElL.classList.remove("on"); laserElR.classList.remove("on"); return; }
+  positionLaser(laserElL, eL.x, eL.y, tx, ty);
+  positionLaser(laserElR, eR.x, eR.y, tx, ty);
+  laserElL.classList.add("on");
+  laserElR.classList.add("on");
+}
+
+function initHeadViz() {
+  if (headViz.initialized) return;
+  const canvas = document.getElementById("headviz-canvas");
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+
+  // Exact v2 scene/camera setup
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xf4f3ef);
+  scene.fog = new THREE.FogExp2(0xf4f3ef, 1.4);
+
+  const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.01, 100);
+  camera.position.set(0, 0, 1.0);
+  camera.lookAt(0, 0, 0);
+
+  function matFn(size, opacity, color = 0x1a1a1a) {
+    return new THREE.PointsMaterial({
+      color, size, sizeAttenuation: true,
+      transparent: true, opacity, fog: true, depthWrite: false,
+    });
+  }
+
+  const faceDefs  = buildFaceSampleDefs();
+  const irisDefs  = buildIrisRingDefs();
+  const pupilDefs = buildPupilDefs();
+
+  // Main face cloud (charcoal) — v2 values
+  const facePoints = new THREE.Points(
+    makePointsBuffer(faceDefs.length),
+    matFn(0.0022, 0.08, 0x1a1a1a)
+  );
+  facePoints.frustumCulled = false;
+  scene.add(facePoints);
+
+  // Iris ring (deep blue) — v2 values
+  const irisRingPoints = new THREE.Points(
+    makePointsBuffer(irisDefs.length),
+    matFn(0.0028, 0.32, 0x1d4ed8)
+  );
+  irisRingPoints.frustumCulled = false;
+  scene.add(irisRingPoints);
+
+  // Pupils (yellow) — v2 values
+  const pupilPoints = new THREE.Points(
+    makePointsBuffer(pupilDefs.length),
+    matFn(0.0030, 0.55, 0xeab308)
+  );
+  pupilPoints.frustumCulled = false;
+  scene.add(pupilPoints);
+
+  // Torso particle hint — fades into floor below the head
+  const TORSO_COUNT = 3500;
+  const torsoGeom = makePointsBuffer(TORSO_COUNT);
+  {
+    const arr = torsoGeom.attributes.position.array;
+    for (let i = 0; i < TORSO_COUNT; i++) {
+      const t = Math.random();
+      const yShape = -0.1 - t * 0.9;
+      const widen  = 0.18 + t * 0.45;
+      arr[i*3+0] = (Math.random() - 0.5) * 2 * widen;
+      arr[i*3+1] = yShape;
+      arr[i*3+2] = (Math.random() - 0.5) * 0.4 - 0.05;
+    }
+  }
+  const torsoPoints = new THREE.Points(torsoGeom, matFn(0.0045, 0.10));
+  torsoPoints.frustumCulled = false;
+  scene.add(torsoPoints);
+
+  // Ambient background particles — drift slowly, give the air some depth
+  const BG_COUNT = 2500;
+  const bgGeom = makePointsBuffer(BG_COUNT);
+  {
+    const arr = bgGeom.attributes.position.array;
+    for (let i = 0; i < BG_COUNT; i++) {
+      arr[i*3+0] = (Math.random() - 0.5) * 3.5;
+      arr[i*3+1] = (Math.random() - 0.5) * 2.5;
+      arr[i*3+2] = -0.4 - Math.random() * 1.6;
+    }
+  }
+  const bgPoints = new THREE.Points(bgGeom, matFn(0.0028, 0.08));
+  bgPoints.frustumCulled = false;
+  scene.add(bgPoints);
+
+  Object.assign(headViz, {
+    renderer, scene, camera,
+    facePoints, irisRingPoints, pupilPoints,
+    torsoPoints, bgPoints,
+    faceDefs, irisDefs, pupilDefs,
+    tmpVec: new THREE.Vector3(),
+    initialized: true,
+  });
+
+  window.addEventListener("resize", () => {
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+  });
+}
+
+function updateHeadViz(lm, pose) {
+  if (!headViz.initialized) return;
+  if (!lm) { headViz.renderer.render(headViz.scene, headViz.camera); return; }
+
+  // Match v2's coordinate frame: wider face via video aspect
+  const aspect = (video.videoWidth || 16) / (video.videoHeight || 9);
+  const FSCALE = 0.9;
+  const ZS = aspect * 1.8;
+
+  // --- writeLandmarkSamples equivalent ---
+  const arrF = headViz.facePoints.geometry.attributes.position.array;
+  const defsF = headViz.faceDefs;
+  for (let i = 0; i < defsF.length; i++) {
+    const d = defsF[i];
+    let px, py, pz;
+    if (d.type === "point") {
+      const p = lm[d.idx];
+      px = p.x; py = p.y; pz = p.z;
+    } else {
+      const a = lm[d.a], b = lm[d.b];
+      const t = d.t, omt = 1 - t;
+      px = a.x * omt + b.x * t;
+      py = a.y * omt + b.y * t;
+      pz = a.z * omt + b.z * t;
+    }
+    arrF[i*3+0] = (0.5 - px) * FSCALE * aspect + d.ox;
+    arrF[i*3+1] = (0.5 - py) * FSCALE + d.oy;
+    arrF[i*3+2] = -pz * FSCALE * ZS / 1.8 + d.oz;
+  }
+  headViz.facePoints.geometry.attributes.position.needsUpdate = true;
+
+  // --- Radial iris / pupil samples ---
+  const leftCenter  = lm[468], rightCenter = lm[473];
+  function eyeRadii(center, ringIdxs) {
+    let rx = 0, ry = 0;
+    for (const i of ringIdxs) {
+      rx = Math.max(rx, Math.abs(lm[i].x - center.x));
+      ry = Math.max(ry, Math.abs(lm[i].y - center.y));
+    }
+    return { rx, ry };
+  }
+  const lR = eyeRadii(leftCenter,  [469, 470, 471, 472]);
+  const rR = eyeRadii(rightCenter, [474, 475, 476, 477]);
+
+  function writeRadial(points, defs) {
+    const arr = points.geometry.attributes.position.array;
+    for (let i = 0; i < defs.length; i++) {
+      const d = defs[i];
+      const isLeft = d.side === "left";
+      const c = isLeft ? leftCenter : rightCenter;
+      const r = isLeft ? lR : rR;
+      const px = c.x + Math.cos(d.angle) * r.rx * d.rNorm + d.ox;
+      const py = c.y + Math.sin(d.angle) * r.ry * d.rNorm + d.oy;
+      const pz = c.z + d.oz;
+      arr[i*3+0] = (0.5 - px) * FSCALE * aspect;
+      arr[i*3+1] = (0.5 - py) * FSCALE;
+      arr[i*3+2] = -pz * FSCALE * ZS / 1.8;
+    }
+    points.geometry.attributes.position.needsUpdate = true;
+  }
+  writeRadial(headViz.irisRingPoints, headViz.irisDefs);
+  writeRadial(headViz.pupilPoints,    headViz.pupilDefs);
+
+  // --- Project pupil centers to screen coords (page pixels), for laser origins ---
+  const cam = headViz.camera;
+  function projPupil(center) {
+    const lx = (0.5 - center.x) * FSCALE * aspect;
+    const ly = (0.5 - center.y) * FSCALE;
+    const lz = -center.z * FSCALE * ZS / 1.8;
+    const v = headViz.tmpVec.set(lx, ly, lz).project(cam);
+    return {
+      x: (v.x * 0.5 + 0.5) * window.innerWidth,
+      y: (-v.y * 0.5 + 0.5) * window.innerHeight,
+    };
+  }
+  headViz.eyeScreenL = projPupil(leftCenter);
+  headViz.eyeScreenR = projPupil(rightCenter);
+
+  // Slow drift on the ambient layers, matching v2
+  const t = performance.now();
+  if (headViz.bgPoints)    headViz.bgPoints.rotation.y += 0.0008;
+  if (headViz.torsoPoints) headViz.torsoPoints.rotation.y = Math.sin(t * 0.0003) * 0.04;
+
+  headViz.renderer.render(headViz.scene, headViz.camera);
+}
+
+// ============================================================
+// Setup
+// ============================================================
+async function setup() {
+  const fileset = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+  );
+  faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      delegate: "GPU",
+    },
+    outputFaceBlendshapes: false,
+    outputFacialTransformationMatrixes: true,
+    runningMode: "VIDEO",
+    numFaces: 1,
+  });
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: 1280, height: 720 }, audio: false,
+  });
+  video.srcObject = stream;
+  await new Promise((r) => (video.onloadedmetadata = r));
+  await video.play();
+
+  makeCalibGrid();
+  initHeadViz();
+  loading.remove();
+  requestAnimationFrame(loop);
+}
+
+function makeCalibGrid() {
+  const cols = 4, rows = 3;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const fx = 0.08 + (c / (cols - 1)) * 0.84;
+      const fy = 0.12 + (r / (rows - 1)) * 0.76;
+      const el = document.createElement("div");
+      el.className = "calib-dot";
+      el.style.left = fx * 100 + "%";
+      el.style.top  = fy * 100 + "%";
+      calibGrid.appendChild(el);
+    }
+  }
+}
+
+// ============================================================
+// Main loop
+// ============================================================
+function loop() {
+  const now = performance.now();
+  if (video.readyState >= 2 && video.currentTime !== lastTime) {
+    lastTime = video.currentTime;
+    const res = faceLandmarker.detectForVideo(video, now);
+    computeFeatures(res);
+    predictAndDraw();
+    const lm = res.faceLandmarks && res.faceLandmarks[0];
+    updateHeadViz(lm, curPose);
+    updateLasers();
+  }
+  requestAnimationFrame(loop);
+}
+
+// ============================================================
+// Feature extraction: rectified eye patches + head pose
+// ============================================================
+function computeFeatures(res) {
+  const lm = res.faceLandmarks && res.faceLandmarks[0];
+  if (!lm) { curFeat = null; return; }
+
+  const W = video.videoWidth, H = video.videoHeight;
+  extractRectifiedPatch(lm, LEFT_IDX,  pLctx, W, H);
+  extractRectifiedPatch(lm, RIGHT_IDX, pRctx, W, H);
+  // Also extract the old axis-aligned crops (reference only, not used as features)
+  extractAxisAlignedPatch(lm, LEFT_IDX,  oLctx, W, H);
+  extractAxisAlignedPatch(lm, RIGHT_IDX, oRctx, W, H);
+
+  // Grab grayscale pixel features from both patches
+  const feat = new Float32Array(usePose ? D_WITH_POSE : D_NO_POSE);
+  const dataL = pLctx.getImageData(0, 0, PATCH_W, PATCH_H).data;
+  const dataR = pRctx.getImageData(0, 0, PATCH_W, PATCH_H).data;
+  const inv255 = 1 / 255;
+  for (let i = 0, j = 0; i < dataL.length; i += 4, j++) {
+    // Rec.601 luma
+    feat[j] = (dataL[i] * 0.299 + dataL[i + 1] * 0.587 + dataL[i + 2] * 0.114) * inv255;
+  }
+  for (let i = 0, j = PIXEL_DIMS_PER_EYE; i < dataR.length; i += 4, j++) {
+    feat[j] = (dataR[i] * 0.299 + dataR[i + 1] * 0.587 + dataR[i + 2] * 0.114) * inv255;
+  }
+
+  // Head pose
+  const m = res.facialTransformationMatrixes && res.facialTransformationMatrixes[0];
+  if (m) curPose = matrixToEuler(m);
+  else   curPose = { yaw: 0, pitch: 0, roll: 0 };
+
+  if (curPose) {
+    document.getElementById("yaw")  .textContent = (curPose.yaw  * 180 / Math.PI).toFixed(1) + "°";
+    document.getElementById("pitch").textContent = (curPose.pitch * 180 / Math.PI).toFixed(1) + "°";
+    document.getElementById("roll") .textContent = (curPose.roll * 180 / Math.PI).toFixed(1) + "°";
+  }
+
+  // Append pose features (normalized + scaled) and bias
+  if (usePose) {
+    const PI_Q = Math.PI / 4; // ±45° maps to ±1
+    feat[TOTAL_PIXEL_DIMS]     = (curPose.yaw   / PI_Q) * poseScale;
+    feat[TOTAL_PIXEL_DIMS + 1] = (curPose.pitch / PI_Q) * poseScale;
+    feat[TOTAL_PIXEL_DIMS + 2] = (curPose.roll  / PI_Q) * poseScale;
+    feat[TOTAL_PIXEL_DIMS + 3] = 1; // bias
+  } else {
+    feat[TOTAL_PIXEL_DIMS] = 1; // bias
+  }
+
+  curFeat = feat;
+}
+
+function extractAxisAlignedPatch(lm, idx, ctx, W, H) {
+  // Reference axis-aligned bounding box around the eye-corner + lid
+  // landmarks, drawn to the patch canvas with the same 2:1 aspect ratio
+  // as the rectified version.
+  const p = (i) => ({ x: lm[i].x * W, y: lm[i].y * H });
+  const outer = p(idx.outer), inner = p(idx.inner);
+  const top = p(idx.top),     bot   = p(idx.bot);
+  const xs = [outer.x, inner.x, top.x, bot.x];
+  const ys = [outer.y, inner.y, top.y, bot.y];
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const rawW = Math.max(maxX - minX, 40);
+  const padW = rawW * 1.35;
+  const padH = padW * (PATCH_H / PATCH_W);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, PATCH_W, PATCH_H);
+  ctx.drawImage(video,
+    cx - padW / 2, cy - padH / 2, padW, padH,
+    0, 0, PATCH_W, PATCH_H);
+  ctx.restore();
+}
+
+function extractRectifiedPatch(lm, idx, ctx, W, H) {
+  const p = (i) => ({ x: lm[i].x * W, y: lm[i].y * H });
+  const cornerA = p(idx.outer);
+  const cornerB = p(idx.inner);
+  const [from, to] = cornerA.x < cornerB.x ? [cornerA, cornerB] : [cornerB, cornerA];
+  const midX = (from.x + to.x) / 2;
+  const midY = (from.y + to.y) / 2;
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const eyeLen = Math.hypot(dx, dy);
+  const angle  = Math.atan2(dy, dx);
+  // Canonical layout: corners at ±(PATCH_W/2 - inset) from patch center
+  const inset = 4;
+  const targetLen = PATCH_W - 2 * inset;
+  const scale = targetLen / eyeLen;
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, PATCH_W, PATCH_H);
+  ctx.translate(PATCH_W / 2, PATCH_H / 2);
+  ctx.scale(scale, scale);
+  ctx.rotate(-angle);
+  ctx.translate(-midX, -midY);
+  ctx.drawImage(video, 0, 0);
+  ctx.restore();
+}
+
+function matrixToEuler(mat) {
+  // Column-major 4x4; use row-major access via data[col*4 + row]
+  const m = mat.data;
+  const sy = Math.sqrt(m[0] * m[0] + m[1] * m[1]);
+  const singular = sy < 1e-6;
+  let x, y, z;
+  if (!singular) {
+    x = Math.atan2(m[6], m[10]);
+    y = Math.atan2(-m[2], sy);
+    z = Math.atan2(m[1], m[0]);
+  } else {
+    x = Math.atan2(-m[9], m[5]);
+    y = Math.atan2(-m[2], sy);
+    z = 0;
+  }
+  return { pitch: x, yaw: y, roll: z };
+}
+
+// ============================================================
+// Predict + draw
+// ============================================================
+function predictAndDraw() {
+  if (curFeat && wx && wy) {
+    const px = dot(curFeat, wx);
+    const py = dot(curFeat, wy);
+    markerOurs.style.left = px + "px";
+    markerOurs.style.top  = py + "px";
+    markerOurs.classList.add("visible");
+  } else {
+    markerOurs.classList.remove("visible");
+  }
+}
+
+function dot(a, b) {
+  let s = 0;
+  const n = a.length;
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s;
+}
+
+// ============================================================
+// Clicks → samples → refit
+// ============================================================
+document.addEventListener("click", (e) => {
+  // Ignore clicks on UI
+  if (e.target && e.target.closest(".controls, .pip, .click-anywhere, .gaze-marker")) return;
+  if (!curFeat) return;
+
+  // ---- Online eval: score each model BEFORE it sees this click ----
+  // Our model: uses current (pre-refit) weights
+  if (wx && wy) {
+    const ex = e.clientX - dot(curFeat, wx);
+    const ey = e.clientY - dot(curFeat, wy);
+    const err = Math.hypot(ex, ey);
+    evalS.streamOurs.sum += err;
+    evalS.streamOurs.n++;
+    if (curPose) {
+      const bi = binIdx(curPose.yaw, curPose.pitch);
+      evalS.binsOurs[bi].sum += err;
+      evalS.binsOurs[bi].n++;
+    }
+  }
+  refreshEvalUI();
+
+  // ---- Store the training sample + refit ----
+  const f = new Float32Array(curFeat); // snapshot (curFeat is reused next frame)
+  samples.X.push(f);
+  samples.ys.push(e.clientX);
+  samples.yt.push(e.clientY);
+  samples.clicks.push({ x: e.clientX, y: e.clientY });
+
+  document.getElementById("n-samples").textContent = samples.X.length;
+
+  if (e.target && e.target.classList.contains("calib-dot")) {
+    e.target.classList.add("done");
+  }
+
+  if (samples.X.length >= 8) refit();
+}, true);
+
+document.getElementById("btn-clear").addEventListener("click", () => {
+  samples.X.length = 0;
+  samples.ys.length = 0;
+  samples.yt.length = 0;
+  samples.clicks.length = 0;
+  wx = wy = null;
+  document.getElementById("n-samples").textContent = "0";
+  document.getElementById("mse-ours").textContent = "—";
+  document.querySelectorAll(".calib-dot.done").forEach(d => d.classList.remove("done"));
+  resetEval();
+});
+document.getElementById("btn-refit").addEventListener("click", refit);
+
+document.getElementById("use-pose").addEventListener("change", (e) => {
+  usePose = e.target.checked;
+  // Clear samples since the feature dim changes
+  if (samples.X.length) {
+    if (confirm("Switching pose on/off changes feature size. Clear samples?")) {
+      document.getElementById("btn-clear").click();
+    } else {
+      e.target.checked = !e.target.checked;
+      usePose = e.target.checked;
+    }
+  }
+});
+document.getElementById("pose-scale").addEventListener("input", (e) => {
+  poseScale = parseFloat(e.target.value);
+  document.getElementById("pose-scale-val").textContent = poseScale.toFixed(1);
+  // Poses baked into historical samples are frozen — refit only picks up new scale
+  // once new samples come in. Inform the user by re-normalizing existing pose
+  // values in every stored sample.
+  if (samples.X.length) {
+    for (const f of samples.X) {
+      // We stored normalized pose * scale. To "re-scale" we'd need raw values,
+      // which we don't keep. Simplest: nudge the user.
+    }
+  }
+});
+document.getElementById("lambda").addEventListener("input", (e) => {
+  const s = parseFloat(e.target.value);
+  lambda = Math.pow(10, s);
+  document.getElementById("lambda-val").textContent = lambda.toFixed(lambda < 1 ? 2 : (lambda < 10 ? 1 : 0));
+  if (samples.X.length >= 8) refit();
+});
+
+// ============================================================
+// Ridge regression (dual formulation)
+//   w = X^T (X X^T + λI)^-1 y
+//   — efficient when #samples < #features, which is our case.
+// ============================================================
+function refit() {
+  const n = samples.X.length;
+  if (n < 4) return;
+  const d = samples.X[0].length;
+
+  // K = X X^T   (n × n)
+  const K = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) {
+    const xi = samples.X[i];
+    for (let j = i; j < n; j++) {
+      const xj = samples.X[j];
+      let s = 0;
+      for (let k = 0; k < d; k++) s += xi[k] * xj[k];
+      K[i * n + j] = s;
+      K[j * n + i] = s;
+    }
+  }
+  for (let i = 0; i < n; i++) K[i * n + i] += lambda;
+
+  // Solve K α = y for both targets
+  const yx = Float64Array.from(samples.ys);
+  const yt = Float64Array.from(samples.yt);
+  const Kcopy = new Float64Array(K); // gaussElim mutates its input
+  const ax = gaussSolve(Kcopy, yx, n);
+
+  const Kcopy2 = new Float64Array(K);
+  const ay = gaussSolve(Kcopy2, yt, n);
+
+  if (!ax || !ay) return;
+
+  // w = X^T α   (d,)
+  const wxN = new Float32Array(d);
+  const wyN = new Float32Array(d);
+  for (let i = 0; i < n; i++) {
+    const xi = samples.X[i];
+    const cx = ax[i], cy = ay[i];
+    for (let k = 0; k < d; k++) {
+      wxN[k] += xi[k] * cx;
+      wyN[k] += xi[k] * cy;
+    }
+  }
+  wx = wxN; wy = wyN;
+
+  // Train MSE/RMSE
+  let sx = 0, sy = 0;
+  for (let i = 0; i < n; i++) {
+    const xi = samples.X[i];
+    const px = dot(xi, wx), py = dot(xi, wy);
+    const ex = samples.ys[i] - px, ey = samples.yt[i] - py;
+    sx += ex * ex; sy += ey * ey;
+  }
+  const rmseX = Math.sqrt(sx / n), rmseY = Math.sqrt(sy / n);
+  const rmseAvg = (rmseX + rmseY) / 2;
+  document.getElementById("mse-ours").textContent = rmseAvg.toFixed(0) + " px";
+
+}
+
+// Solve A x = b with plain Gaussian elimination + partial pivoting.
+// A is n×n Float64 row-major. Mutates A and b. Returns solution (Float64Array) or null.
+function gaussSolve(A, b, n) {
+  const x = new Float64Array(b);
+  for (let i = 0; i < n; i++) {
+    // Find pivot
+    let p = i;
+    let pv = Math.abs(A[i * n + i]);
+    for (let r = i + 1; r < n; r++) {
+      const v = Math.abs(A[r * n + i]);
+      if (v > pv) { pv = v; p = r; }
+    }
+    if (pv < 1e-10) return null;
+    if (p !== i) {
+      for (let c = i; c < n; c++) {
+        const t = A[i * n + c]; A[i * n + c] = A[p * n + c]; A[p * n + c] = t;
+      }
+      const t = x[i]; x[i] = x[p]; x[p] = t;
+    }
+    // Eliminate
+    const piv = A[i * n + i];
+    for (let r = i + 1; r < n; r++) {
+      const f = A[r * n + i] / piv;
+      if (f === 0) continue;
+      for (let c = i; c < n; c++) A[r * n + c] -= f * A[i * n + c];
+      x[r] -= f * x[i];
+    }
+  }
+  // Back-substitute
+  const out = new Float64Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    let s = x[i];
+    for (let c = i + 1; c < n; c++) s -= A[i * n + c] * out[c];
+    out[i] = s / A[i * n + i];
+  }
+  return out;
+}
+
+// ============================================================
+// Kick off
+// ============================================================
+setup().catch((err) => {
+  loading.textContent = "setup failed: " + (err && err.message || err);
+  console.error(err);
+});
+</script>
+</body>
+</html>
