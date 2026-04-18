@@ -136,6 +136,10 @@
     <span class="label">show raw</span>
     <input id="show-raw" type="checkbox" checked style="accent-color:#1a1a1a;" />
   </div>
+  <div class="row" style="gap:8px;align-items:center;">
+    <span class="label">learn on mousemove</span>
+    <input id="learn-mousemove" type="checkbox" style="accent-color:#1a1a1a;" />
+  </div>
 </div>
 
 <div id="smooth-dot"></div>
@@ -239,6 +243,27 @@
     hudY.textContent = smoothedY.toFixed(0);
   }).begin().then(() => {
     try { webgazer.showPredictionPoints(showRaw.checked); } catch (e) { console.warn(e); }
+
+    // By default WebGazer adds a training sample on every mousemove,
+    // assuming you look at your cursor. That's usually wrong for us, so
+    // we kill its listeners and re-route clicks through its API. A toggle
+    // lets you opt back into the mousemove-trains-the-model behavior.
+    const learnMousemove = document.getElementById("learn-mousemove");
+    function onClickTrain(e) {
+      webgazer.recordScreenPosition(e.clientX, e.clientY, "click");
+    }
+    function applyMouseMode() {
+      webgazer.removeMouseEventListeners();
+      if (learnMousemove.checked) {
+        webgazer.addMouseEventListeners(); // restore WebGazer's defaults
+        document.removeEventListener("click", onClickTrain, true);
+      } else {
+        document.addEventListener("click", onClickTrain, true);
+      }
+    }
+    applyMouseMode();
+    learnMousemove.addEventListener("change", applyMouseMode);
+
     makeDots();
     loading.remove();
     intro.hidden = false;
