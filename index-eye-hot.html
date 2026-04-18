@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Eye Hot — gaze freeze-ray game</title>
+<title>Eye Hot — gaze laser-eye game</title>
 <script type="importmap">
 {
   "imports": {
@@ -304,27 +304,6 @@
     width: 100%; height: 100%;
     overflow: visible;
   }
-  .enemy .halo {
-    position: absolute;
-    left: 50%; top: 50%;
-    width: 120%; height: 120%;
-    transform: translate(-50%, -50%);
-    border-radius: 50%;
-    box-shadow: 0 0 0 2px rgba(255,40,40,0), 0 0 24px 4px rgba(255,40,40,0);
-    transition: box-shadow 120ms;
-    pointer-events: none;
-  }
-  .enemy.frozen .halo {
-    animation: freezePulse 1.1s ease-in-out infinite;
-  }
-  @keyframes freezePulse {
-    0%, 100% {
-      box-shadow: 0 0 0 1px rgba(255,40,40,0.55), 0 0 14px 2px rgba(255,40,40,0.35);
-    }
-    50% {
-      box-shadow: 0 0 0 2px rgba(255,40,40,0.9), 0 0 28px 6px rgba(255,40,40,0.55);
-    }
-  }
   .enemy.dying {
     animation: vaporize 220ms ease-out forwards;
   }
@@ -407,7 +386,7 @@
   <p class="sub">
     Click each dot while looking straight at it. This teaches the gaze model
     where your eyes land on the screen. Once you have enough samples, start
-    the game — stare at enemies to freeze them, pinch thumb + index to kill.
+    the game — your gaze is a laser. Look at an enemy to vaporize it.
   </p>
   <div class="counter">
     Samples: <strong id="samples-count">0</strong> / 8+ &nbsp;·&nbsp;
@@ -430,7 +409,7 @@
 
 <!-- Play hint -->
 <div class="play-hint" id="play-hint">
-  Stare to freeze · pinch thumb + index to kill
+  Look at an enemy to vaporize it
 </div>
 
 <!-- Game over -->
@@ -449,7 +428,6 @@
 import * as THREE from "three";
 import {
   FaceLandmarker,
-  HandLandmarker,
   FilesetResolver,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9";
 
@@ -490,7 +468,6 @@ const LEFT_IDX  = { outer: 33,  inner: 133, top: 159, bot: 145, pupil: 468 };
 const RIGHT_IDX = { inner: 362, outer: 263, top: 386, bot: 374, pupil: 473 };
 
 let faceLandmarker = null;
-let handLandmarker = null;
 let lastTime = -1;
 
 let curFeat = null;
@@ -512,7 +489,7 @@ const lambda = Math.pow(10, -0.3);
 /** @type {"calibrating" | "playing" | "gameover"} */
 let gamePhase = "calibrating";
 
-const FREEZE_RADIUS    = 92;
+const KILL_RADIUS      = 90;
 const DEATH_RADIUS     = 100;
 const MIN_CALIB_SAMPLES = 8;
 const INITIAL_SPAWN_MS = 1800;
@@ -533,7 +510,6 @@ const game = {
   lastStepTime: 0,
   laserFlashEnd: 0,
   laserFlashTarget: null,
-  pinchWasActive: false,
 };
 
 // ============================================================
@@ -870,15 +846,6 @@ async function setup() {
     runningMode: "VIDEO",
     numFaces: 1,
   });
-  handLandmarker = await HandLandmarker.createFromOptions(fileset, {
-    baseOptions: {
-      modelAssetPath:
-        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-      delegate: "GPU",
-    },
-    runningMode: "VIDEO",
-    numHands: 2,
-  });
 
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { width: 1280, height: 720, facingMode: "user" }, audio: false,
@@ -917,18 +884,11 @@ function loop() {
   const now = performance.now();
   if (video.readyState >= 2 && video.currentTime !== lastTime) {
     lastTime = video.currentTime;
-    // Hands first — cheap, and the result drives pinch-trigger logic
-    let handRes = null;
-    if (handLandmarker) {
-      try { handRes = handLandmarker.detectForVideo(video, now); }
-      catch (e) { /* transient wasm hiccups */ }
-    }
     const faceRes = faceLandmarker.detectForVideo(video, now);
     computeFeatures(faceRes);
     predictAndDraw();
     const lm = faceRes.faceLandmarks && faceRes.faceLandmarks[0];
     updateHeadViz(lm);
-    processHandResults(handRes);
   }
   updateLasers();
   if (gamePhase === "playing") stepGame(now);
@@ -1150,32 +1110,6 @@ function gaussSolve(A, b, n) {
 }
 
 // ============================================================
-// Hand results → pinch rising-edge trigger
-// ============================================================
-function distance3(a, b) {
-  const dx = a.x - b.x, dy = a.y - b.y, dz = (a.z || 0) - (b.z || 0);
-  return Math.sqrt(dx * dx + dy * dy + dz * dz);
-}
-function processHandResults(handResults) {
-  if (!handResults || !handResults.landmarks || !handResults.landmarks.length) {
-    game.pinchWasActive = false;
-    return;
-  }
-  let isPinching = false;
-  for (const lm of handResults.landmarks) {
-    const thumb = lm[4], index = lm[8], wrist = lm[0], middleMcp = lm[9];
-    const handSize = distance3(wrist, middleMcp);
-    if (handSize < 1e-4) continue;
-    const pinchNorm = distance3(thumb, index) / handSize;
-    if (pinchNorm < 0.4) { isPinching = true; break; }
-  }
-  if (isPinching && !game.pinchWasActive && gamePhase === "playing") {
-    killFrozenEnemy();
-  }
-  game.pinchWasActive = isPinching;
-}
-
-// ============================================================
 // Enemy factory — stippled silhouette that echoes the avatar
 // ============================================================
 function buildEnemySvg(baseSeed) {
@@ -1227,7 +1161,6 @@ function startGame() {
   game.lastStepTime = 0;
   game.laserFlashEnd = 0;
   game.laserFlashTarget = null;
-  game.pinchWasActive = false;
 
   gamePhase = "playing";
   startScreen.classList.remove("show");
@@ -1267,7 +1200,7 @@ function spawnEnemy() {
   const size = 62 + Math.random() * 22;
   const el = document.createElement("div");
   el.className = "enemy";
-  el.innerHTML = buildEnemySvg() + '<div class="halo"></div>';
+  el.innerHTML = buildEnemySvg();
   el.style.width  = size + "px";
   el.style.height = (size * 1.33) + "px";
   enemiesLayer.appendChild(el);
@@ -1278,71 +1211,59 @@ function spawnEnemy() {
     vx: (dx / len) * speed,
     vy: (dy / len) * speed,
     size,
-    frozen: false,
     dying: false,
     el,
   });
 }
 
+function killEnemy(e, now) {
+  if (e.dying) return;
+  e.dying = true;
+  e.el.classList.add("dying");
+  game.laserFlashEnd = now + 220;
+  game.laserFlashTarget = { x: e.x, y: e.y };
+  game.kills++;
+  setTimeout(() => {
+    e.el.remove();
+    const idx = game.enemies.indexOf(e);
+    if (idx >= 0) game.enemies.splice(idx, 1);
+  }, 240);
+}
+
 function updateEnemies(dt, now) {
   const cx = window.innerWidth / 2, cy = window.innerHeight / 2;
   const gaze = currentGaze();
+  const killR2 = KILL_RADIUS * KILL_RADIUS;
   let died = false;
 
   for (let i = game.enemies.length - 1; i >= 0; i--) {
     const e = game.enemies[i];
-    if (e.dying) {
-      // animation-driven; position kept frozen, styling handled by CSS
-      continue;
-    }
-    // Freeze check based on current gaze prediction
-    if (gaze) {
-      const dxg = e.x - gaze.x, dyg = e.y - gaze.y;
-      e.frozen = (dxg * dxg + dyg * dyg) < FREEZE_RADIUS * FREEZE_RADIUS;
-    } else {
-      e.frozen = false;
-    }
-    if (!e.frozen) {
-      e.x += e.vx * dt;
-      e.y += e.vy * dt;
-    }
+    if (e.dying) continue;
+
+    // Move
+    e.x += e.vx * dt;
+    e.y += e.vy * dt;
+
     // Render — translate anchors enemy center to (x, y)
     const tx = (e.x - e.size / 2).toFixed(1);
     const ty = (e.y - (e.size * 1.33) / 2).toFixed(1);
     e.el.style.transform = `translate(${tx}px, ${ty}px)`;
     e.el.style.setProperty("--pos", `translate(${tx}px, ${ty}px)`);
-    e.el.classList.toggle("frozen", e.frozen);
+
+    // Kill-on-gaze contact
+    if (gaze) {
+      const dxg = e.x - gaze.x, dyg = e.y - gaze.y;
+      if (dxg * dxg + dyg * dyg < killR2) {
+        killEnemy(e, now);
+        continue;
+      }
+    }
 
     // Death check
     const dd = Math.hypot(e.x - cx, e.y - cy);
     if (dd < DEATH_RADIUS) died = true;
   }
   if (died) endGame();
-}
-
-function killFrozenEnemy() {
-  const gaze = currentGaze();
-  if (!gaze) return;
-  let best = null, bestD = Infinity;
-  for (const e of game.enemies) {
-    if (!e.frozen || e.dying) continue;
-    const d = Math.hypot(e.x - gaze.x, e.y - gaze.y);
-    if (d < bestD) { bestD = d; best = e; }
-  }
-  if (!best) return;
-  best.dying = true;
-  best.frozen = false;
-  best.el.classList.remove("frozen");
-  best.el.classList.add("dying");
-  game.laserFlashEnd = performance.now() + 240;
-  game.laserFlashTarget = { x: best.x, y: best.y };
-  game.kills++;
-  const victim = best;
-  setTimeout(() => {
-    victim.el.remove();
-    const idx = game.enemies.indexOf(victim);
-    if (idx >= 0) game.enemies.splice(idx, 1);
-  }, 260);
 }
 
 function updateDangerRing() {
