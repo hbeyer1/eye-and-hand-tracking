@@ -182,7 +182,7 @@
   // Start WebGazer
   webgazer
     .setRegression("ridge")
-    .setTracker("TFFacemesh")
+    .setTracker("TFFaceMesh")
     .setGazeListener((data) => {
       if (!data) return;
       hudX.textContent = data.x.toFixed(0);
@@ -190,7 +190,9 @@
     })
     .begin()
     .then(() => {
-      webgazer.showVideoPreview(true);
+      webgazer.showVideo(true);
+      webgazer.showFaceOverlay(true);
+      webgazer.showFaceFeedbackBox(true);
       webgazer.showPredictionPoints(true);
       makeDots();
       loading.remove();
@@ -200,6 +202,7 @@
     })
     .catch((err) => {
       loading.textContent = "WebGazer failed to start: " + err.message;
+      console.error(err);
     });
 </script>
 </body>
