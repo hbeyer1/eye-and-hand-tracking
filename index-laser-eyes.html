@@ -1848,11 +1848,16 @@ const laserGame = {
   lastEyeL: null,         // screen-space {x, y}
   lastEyeR: null,
   maxDogs: 5,
-  hitRadius: 52,          // px — how forgiving gaze-over-dog is
-  killMs: 420,            // ms of sustained gaze to vaporize a dog
+  hitRadius: 58,          // px — how forgiving gaze-over-dog is
+  killMs: 500,            // ms of sustained gaze to vaporize a dog
   lifespanMs: 8000,       // dog despawns as miss if ignored
   tmp: new THREE.Vector3(),
   lastTick: performance.now(),
+  // Second-stage aim smoothing (applied on top of v1/WebGazer's own smoothing).
+  // Time-based EMA: alpha = 1 - exp(-dt / aimTauMs). Bigger tau = smoother / laggier.
+  aimX: null,
+  aimY: null,
+  aimTauMs: 260,
 };
 
 // Gaze source selector — lets the game pick between v1's built-in
@@ -1864,7 +1869,7 @@ const laserGazeSource = {
   wgStarted: false,
   wgStarting: false,
   wgRaw: null,         // {x, y} — latest raw webgazer prediction
-  wgSmooth: 0.85,      // EMA on WG output, same as in the webgazer demo
+  wgSmooth: 0.90,      // EMA on WG output — input to the game's aim stage
   wgSmoothX: null,
   wgSmoothY: null,
 };
@@ -2021,6 +2026,20 @@ function tickLaserGame() {
   } else {
     gx = sm.gazeX; gy = sm.gazeY;
     gazeValid = gx != null && gy != null && showGaze;
+  }
+
+  // Second-stage aim smoothing (frame-rate independent)
+  if (gazeValid) {
+    if (laserGame.aimX === null) { laserGame.aimX = gx; laserGame.aimY = gy; }
+    else {
+      const a = 1 - Math.exp(-dt / laserGame.aimTauMs);
+      laserGame.aimX += a * (gx - laserGame.aimX);
+      laserGame.aimY += a * (gy - laserGame.aimY);
+    }
+    gx = laserGame.aimX;
+    gy = laserGame.aimY;
+  } else {
+    laserGame.aimX = laserGame.aimY = null;
   }
 
   // Position lasers from each eye to the gaze point
