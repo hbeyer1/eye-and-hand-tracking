@@ -607,6 +607,9 @@
 <!-- 3D Tesla-style scene -->
 <canvas id="three-canvas"></canvas>
 
+<!-- WebGazer (loaded eagerly so the selector can start it on demand) -->
+<script src="vendor/webgazer/www/webgazer.js"></script>
+
 <!-- Cursors -->
 <div class="cursor finger finger-l" id="cursor-l"></div>
 <div class="cursor finger finger-r" id="cursor-r"></div>
@@ -727,8 +730,19 @@
       Targets appear on screen. Move your finger so the green/blue cursor lands on a target, then pinch thumb+index to pop it.
     </div>
     <button id="toggle-laser" class="primary" style="margin-top:8px;">Start Laser Eyes 🔴</button>
+    <div class="row" style="margin-top:6px;">
+      <span class="label">Gaze source</span>
+      <select id="laser-gaze-source" style="font-family:inherit;font-size:11px;border:1px solid var(--hairline);border-radius:4px;padding:3px 6px;background:transparent;color:var(--text);">
+        <option value="v1" selected>v1 (built-in)</option>
+        <option value="webgazer">WebGazer</option>
+      </select>
+    </div>
+    <div class="row" style="margin-top:4px;">
+      <span class="label">WebGazer status</span>
+      <span class="value" id="wg-status">idle</span>
+    </div>
     <div class="hint">
-      Dogs appear on screen. Look at them — red lasers shoot from your eyes. Hold your gaze on a dog for ~0.4s to vaporize it. Best with gaze calibrated. Press <strong>L</strong> to toggle.
+      Dogs appear on screen. Look at them — red lasers shoot from your eyes. Hold your gaze on a dog for ~0.4s to vaporize it. Both sources calibrate from clicks; switch to WebGazer to compare. Press <strong>L</strong> to toggle.
     </div>
   </div>
 
@@ -1841,6 +1855,64 @@ const laserGame = {
   lastTick: performance.now(),
 };
 
+// Gaze source selector — lets the game pick between v1's built-in
+// pipeline and WebGazer. Click-based calibration is kept for both,
+// but WebGazer's mousemove-based training is disabled (it pulls the
+// model toward wherever your cursor is, which is rarely where you're looking).
+const laserGazeSource = {
+  mode: "v1",
+  wgStarted: false,
+  wgStarting: false,
+  wgRaw: null,         // {x, y} — latest raw webgazer prediction
+  wgSmooth: 0.85,      // EMA on WG output, same as in the webgazer demo
+  wgSmoothX: null,
+  wgSmoothY: null,
+};
+
+function onWGClickTrain(e) {
+  if (typeof webgazer === "undefined") return;
+  try { webgazer.recordScreenPosition(e.clientX, e.clientY, "click"); } catch (err) {}
+}
+
+function setWgStatus(text) {
+  const el = document.getElementById("wg-status");
+  if (el) el.textContent = text;
+}
+
+function startWebGazerForLasers() {
+  if (typeof webgazer === "undefined") { setWgStatus("script not loaded"); return; }
+  if (laserGazeSource.wgStarted || laserGazeSource.wgStarting) return;
+  laserGazeSource.wgStarting = true;
+  setWgStatus("starting…");
+  webgazer.setTracker("TFFacemesh");
+  webgazer.setGazeListener((data) => {
+    if (!data) return;
+    laserGazeSource.wgRaw = { x: data.x, y: data.y };
+  }).begin().then(() => {
+    laserGazeSource.wgStarted = true;
+    laserGazeSource.wgStarting = false;
+    setWgStatus("running");
+    try {
+      webgazer.showPredictionPoints(false);
+      webgazer.showVideo(false);
+      webgazer.showFaceOverlay(false);
+      webgazer.showFaceFeedbackBox(false);
+    } catch (e) {}
+    // Kill WebGazer's built-in listeners; re-route clicks only.
+    webgazer.removeMouseEventListeners();
+    document.addEventListener("click", onWGClickTrain, true);
+  }).catch((e) => {
+    laserGazeSource.wgStarting = false;
+    setWgStatus("failed: " + (e?.message || e));
+    console.error("WebGazer begin() rejected:", e);
+  });
+}
+
+document.getElementById("laser-gaze-source").addEventListener("change", (e) => {
+  laserGazeSource.mode = e.target.value;
+  if (laserGazeSource.mode === "webgazer") startWebGazerForLasers();
+});
+
 const DOG_SVG = `
 <svg viewBox="0 0 120 80" xmlns="http://www.w3.org/2000/svg" width="96" height="64" preserveAspectRatio="xMidYMid meet">
   <g fill="#1a1a1a">
@@ -1926,9 +1998,30 @@ function tickLaserGame() {
     laserGame.nextSpawnAt = now + 900 + Math.random() * 1400;
   }
 
-  // Determine target point — smoothed gaze cursor
-  const gx = sm.gazeX, gy = sm.gazeY;
-  const gazeValid = gx != null && gy != null && showGaze;
+  // Determine target point — either v1's smoothed gaze cursor or
+  // WebGazer's smoothed prediction, depending on the selected source.
+  let gx, gy, gazeValid;
+  if (laserGazeSource.mode === "webgazer") {
+    const raw = laserGazeSource.wgRaw;
+    if (raw) {
+      const alpha = 1 - laserGazeSource.wgSmooth;
+      if (laserGazeSource.wgSmoothX === null) {
+        laserGazeSource.wgSmoothX = raw.x; laserGazeSource.wgSmoothY = raw.y;
+      } else {
+        laserGazeSource.wgSmoothX += alpha * (raw.x - laserGazeSource.wgSmoothX);
+        laserGazeSource.wgSmoothY += alpha * (raw.y - laserGazeSource.wgSmoothY);
+      }
+      gx = laserGazeSource.wgSmoothX;
+      gy = laserGazeSource.wgSmoothY;
+      gazeValid = true;
+    } else {
+      gx = gy = null;
+      gazeValid = false;
+    }
+  } else {
+    gx = sm.gazeX; gy = sm.gazeY;
+    gazeValid = gx != null && gy != null && showGaze;
+  }
 
   // Position lasers from each eye to the gaze point
   if (gazeValid && laserGame.lastEyeL && laserGame.lastEyeR) {
