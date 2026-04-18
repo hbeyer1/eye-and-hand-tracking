@@ -240,6 +240,9 @@
     <label><input type="checkbox" id="use-pose" checked /> Include pose (yaw/pitch/roll)</label>
   </div>
   <div class="row">
+    <label><input type="checkbox" id="show-lasers" checked /> Laser to gaze</label>
+  </div>
+  <div class="row">
     <span class="label">Pose weight</span><span class="val" id="pose-scale-val">1.0</span>
   </div>
   <input type="range" id="pose-scale" min="0" max="5" step="0.1" value="1.0" />
@@ -394,6 +397,7 @@ const IRIS_RING_LANDMARKS  = new Set([469, 470, 471, 472, 474, 475, 476, 477]);
 const IRIS_PUPIL_LANDMARKS = new Set([468, 473]);
 const ALL_IRIS_LANDMARKS   = new Set([...IRIS_RING_LANDMARKS, ...IRIS_PUPIL_LANDMARKS]);
 
+// ---- v2 densities (unchanged) ----
 function buildFaceSampleDefs() {
   const defs = [];
   const N_LM = 478;
@@ -411,7 +415,7 @@ function buildFaceSampleDefs() {
   for (let i = 0; i < N_LM; i++) {
     if (ALL_IRIS_LANDMARKS.has(i)) continue;
     const isContour = contourLM.has(i);
-    const N  = isContour ? 220 : 40;
+    const N  = isContour ? 350 : 60;
     const r0 = isContour ? 0.010 : 0.007;
     for (let n = 0; n < N; n++) {
       defs.push({ type: "point", idx: i, ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
@@ -419,7 +423,7 @@ function buildFaceSampleDefs() {
   }
   for (const e of FaceLandmarker.FACE_LANDMARKS_TESSELATION) {
     if (ALL_IRIS_LANDMARKS.has(e.start) || ALL_IRIS_LANDMARKS.has(e.end)) continue;
-    const N = 35, r0 = 0.005;
+    const N = 55, r0 = 0.005;
     for (let n = 0; n < N; n++) {
       defs.push({ type: "edge", a: e.start, b: e.end, t: Math.random(),
                   ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
@@ -427,7 +431,7 @@ function buildFaceSampleDefs() {
   }
   for (const set of contourSets) {
     for (const e of set) {
-      const N = 150, r0 = 0.0025;
+      const N = 250, r0 = 0.0025;
       for (let n = 0; n < N; n++) {
         defs.push({ type: "edge", a: e.start, b: e.end, t: Math.random(),
                     ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
@@ -438,7 +442,7 @@ function buildFaceSampleDefs() {
 }
 function buildIrisRingDefs() {
   const defs = [];
-  const N_PER_EYE = 1400, INNER = 0.40, OUTER = 1.10;
+  const N_PER_EYE = 1800, INNER = 0.40, OUTER = 1.10;
   for (const side of ["left", "right"]) {
     for (let n = 0; n < N_PER_EYE; n++) {
       const u = Math.random();
@@ -452,7 +456,7 @@ function buildIrisRingDefs() {
 }
 function buildPupilDefs() {
   const defs = [];
-  const N_PER_EYE = 500, PUPIL_FRAC = 0.42;
+  const N_PER_EYE = 700, PUPIL_FRAC = 0.42;
   for (const side of ["left", "right"]) {
     for (let n = 0; n < N_PER_EYE; n++) {
       const u = Math.random();
@@ -484,10 +488,15 @@ function positionLaser(el, x1, y1, x2, y2) {
   el.style.transform = `translate(${x1}px, ${y1}px) rotate(${ang}rad)`;
   el.style.width = len + "px";
 }
+let showLasers = true;
+document.addEventListener("DOMContentLoaded", () => {
+  const el = document.getElementById("show-lasers");
+  if (el) el.addEventListener("change", (e) => { showLasers = e.target.checked; });
+});
 function updateLasers() {
+  if (!showLasers) { laserElL.classList.remove("on"); laserElR.classList.remove("on"); return; }
   const eL = headViz.eyeScreenL, eR = headViz.eyeScreenR;
   if (!eL || !eR) { laserElL.classList.remove("on"); laserElR.classList.remove("on"); return; }
-  // Target: our model's prediction if we have one, else WebGazer, else nothing
   let tx = null, ty = null;
   if (wx && wy && curFeat) {
     tx = dot(curFeat, wx);
@@ -505,42 +514,47 @@ function updateLasers() {
 function initHeadViz() {
   if (headViz.initialized) return;
   const canvas = document.getElementById("headviz-canvas");
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight, false);
-  renderer.setClearColor(0xf4f3ef, 0); // transparent — page cream shows through
+
+  // Exact v2 scene/camera setup
   const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xf4f3ef);
+  scene.fog = new THREE.FogExp2(0xf4f3ef, 1.4);
 
   const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.01, 100);
-  camera.position.set(0, 0, 2.2);
+  camera.position.set(0, 0, 1.0);
   camera.lookAt(0, 0, 0);
 
-  function matFn(size, opacity, color) {
+  function matFn(size, opacity, color = 0x1a1a1a) {
     return new THREE.PointsMaterial({
       color, size, sizeAttenuation: true,
-      transparent: true, opacity, depthWrite: false,
+      transparent: true, opacity, fog: true, depthWrite: false,
     });
   }
 
-  // Build (and store) all sample definitions
   const faceDefs  = buildFaceSampleDefs();
   const irisDefs  = buildIrisRingDefs();
   const pupilDefs = buildPupilDefs();
 
+  // Main face cloud (charcoal) — v2 values
   const facePoints = new THREE.Points(
     makePointsBuffer(faceDefs.length),
-    matFn(0.0022, 0.10, 0x1a1a1a)
+    matFn(0.0022, 0.08, 0x1a1a1a)
   );
   facePoints.frustumCulled = false;
   scene.add(facePoints);
 
+  // Iris ring (deep blue) — v2 values
   const irisRingPoints = new THREE.Points(
     makePointsBuffer(irisDefs.length),
-    matFn(0.0028, 0.35, 0x1d4ed8)
+    matFn(0.0028, 0.32, 0x1d4ed8)
   );
   irisRingPoints.frustumCulled = false;
   scene.add(irisRingPoints);
 
+  // Pupils (yellow) — v2 values
   const pupilPoints = new THREE.Points(
     makePointsBuffer(pupilDefs.length),
     matFn(0.0030, 0.55, 0xeab308)
@@ -548,9 +562,43 @@ function initHeadViz() {
   pupilPoints.frustumCulled = false;
   scene.add(pupilPoints);
 
+  // Torso particle hint — fades into floor below the head
+  const TORSO_COUNT = 3500;
+  const torsoGeom = makePointsBuffer(TORSO_COUNT);
+  {
+    const arr = torsoGeom.attributes.position.array;
+    for (let i = 0; i < TORSO_COUNT; i++) {
+      const t = Math.random();
+      const yShape = -0.1 - t * 0.9;
+      const widen  = 0.18 + t * 0.45;
+      arr[i*3+0] = (Math.random() - 0.5) * 2 * widen;
+      arr[i*3+1] = yShape;
+      arr[i*3+2] = (Math.random() - 0.5) * 0.4 - 0.05;
+    }
+  }
+  const torsoPoints = new THREE.Points(torsoGeom, matFn(0.0045, 0.10));
+  torsoPoints.frustumCulled = false;
+  scene.add(torsoPoints);
+
+  // Ambient background particles — drift slowly, give the air some depth
+  const BG_COUNT = 2500;
+  const bgGeom = makePointsBuffer(BG_COUNT);
+  {
+    const arr = bgGeom.attributes.position.array;
+    for (let i = 0; i < BG_COUNT; i++) {
+      arr[i*3+0] = (Math.random() - 0.5) * 3.5;
+      arr[i*3+1] = (Math.random() - 0.5) * 2.5;
+      arr[i*3+2] = -0.4 - Math.random() * 1.6;
+    }
+  }
+  const bgPoints = new THREE.Points(bgGeom, matFn(0.0028, 0.08));
+  bgPoints.frustumCulled = false;
+  scene.add(bgPoints);
+
   Object.assign(headViz, {
     renderer, scene, camera,
     facePoints, irisRingPoints, pupilPoints,
+    torsoPoints, bgPoints,
     faceDefs, irisDefs, pupilDefs,
     tmpVec: new THREE.Vector3(),
     initialized: true,
@@ -640,6 +688,11 @@ function updateHeadViz(lm, pose) {
   }
   headViz.eyeScreenL = projPupil(leftCenter);
   headViz.eyeScreenR = projPupil(rightCenter);
+
+  // Slow drift on the ambient layers, matching v2
+  const t = performance.now();
+  if (headViz.bgPoints)    headViz.bgPoints.rotation.y += 0.0008;
+  if (headViz.torsoPoints) headViz.torsoPoints.rotation.y = Math.sin(t * 0.0003) * 0.04;
 
   headViz.renderer.render(headViz.scene, headViz.camera);
 }
