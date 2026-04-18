@@ -258,18 +258,49 @@
   <input type="range" id="lambda" min="-3" max="3" step="0.1" value="-0.3" />
   <div class="hint">Log-scale: slider value s means λ = 10<sup>s</sup>.</div>
 
-  <h2>Errors (train)</h2>
+  <h2>Eval (online — predict before train)</h2>
   <div class="row">
     <span class="label"><span class="legend"><span class="dot ours"></span></span>ours</span>
-    <span class="val" id="mse-ours">—</span>
+    <span class="val" id="stream-ours">—</span>
   </div>
   <div class="row">
     <span class="label"><span class="legend"><span class="dot wg"></span></span>webgazer</span>
-    <span class="val" id="mse-wg">—</span>
+    <span class="val" id="stream-wg">—</span>
+  </div>
+  <div class="row"><span class="label">samples scored</span><span class="val"><span id="stream-n-ours">0</span> / <span id="stream-n-wg">0</span></span></div>
+  <div class="hint">
+    Before each click is used for training, we ask each model what it
+    would have predicted. Average error over those predictions → px
+    RMSE. Apples-to-apples: same clicks, no leakage.
+  </div>
+
+  <h2>Error heatmap · yaw × pitch</h2>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px;">
+    <div>
+      <div class="hint" style="margin:0 0 3px 0;">ours</div>
+      <canvas id="heatmap-ours" width="120" height="120" style="width:100%;height:auto;display:block;border-radius:4px;image-rendering:pixelated;"></canvas>
+    </div>
+    <div>
+      <div class="hint" style="margin:0 0 3px 0;">webgazer</div>
+      <canvas id="heatmap-wg"   width="120" height="120" style="width:100%;height:auto;display:block;border-radius:4px;image-rendering:pixelated;"></canvas>
+    </div>
   </div>
   <div class="hint">
-    MSE on the collected samples (RMSE in px on each axis, averaged).
-    Train error only; for a true test we'd need a held-out set.
+    X axis: yaw (turn head left ↔ right).
+    Y axis: pitch (tilt up ↕ down).
+    Green = low error, red = high.
+    Gray cells have no samples yet — move your head around while
+    clicking to fill them.
+  </div>
+
+  <h2>Train error (diagnostic)</h2>
+  <div class="row">
+    <span class="label">ours (train)</span>
+    <span class="val" id="mse-ours">—</span>
+  </div>
+  <div class="hint">
+    Fit error on the samples we trained on. Keep close to the online
+    number — if it's much lower, we're overfitting (raise λ).
   </div>
 
   <h2>Head pose</h2>
@@ -365,6 +396,72 @@ let wx = null, wy = null; // Float32Array(D)
 
 // WebGazer state
 const wg = { started: false, starting: false, lastXY: null };
+
+// ---- Online evaluation state ----
+// For every click, before training on it, log each model's live prediction
+// and the current yaw/pitch. That gives us a fair, held-out-per-sample
+// metric for both models on identical data.
+const BINS = 5;
+const YAW_HALF   = 40 * Math.PI / 180;  // ±40°
+const PITCH_HALF = 30 * Math.PI / 180;  // ±30°
+
+function makeBins() {
+  const b = new Array(BINS * BINS);
+  for (let i = 0; i < b.length; i++) b[i] = { sum: 0, n: 0 };
+  return b;
+}
+const evalS = {
+  streamOurs: { sum: 0, n: 0 },
+  streamWG:   { sum: 0, n: 0 },
+  binsOurs: makeBins(),
+  binsWG:   makeBins(),
+};
+function binIdx(yaw, pitch) {
+  const fx = Math.max(0, Math.min(0.9999, (yaw   + YAW_HALF)   / (2 * YAW_HALF)));
+  const fy = Math.max(0, Math.min(0.9999, (pitch + PITCH_HALF) / (2 * PITCH_HALF)));
+  return Math.floor(fy * BINS) * BINS + Math.floor(fx * BINS);
+}
+function resetEval() {
+  evalS.streamOurs = { sum: 0, n: 0 };
+  evalS.streamWG   = { sum: 0, n: 0 };
+  evalS.binsOurs   = makeBins();
+  evalS.binsWG     = makeBins();
+  refreshEvalUI();
+}
+function refreshEvalUI() {
+  const so = evalS.streamOurs, sw = evalS.streamWG;
+  document.getElementById("stream-ours").textContent = so.n ? (so.sum / so.n).toFixed(0) + " px" : "—";
+  document.getElementById("stream-wg")  .textContent = sw.n ? (sw.sum / sw.n).toFixed(0) + " px" : "—";
+  document.getElementById("stream-n-ours").textContent = so.n;
+  document.getElementById("stream-n-wg")  .textContent = sw.n;
+  drawHeatmap(document.getElementById("heatmap-ours"), evalS.binsOurs);
+  drawHeatmap(document.getElementById("heatmap-wg"),   evalS.binsWG);
+}
+function drawHeatmap(canvas, bins) {
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  const cw = W / BINS, ch = H / BINS;
+  // Use a shared scale so the two canvases are comparable — max across both.
+  let maxErr = 1;
+  for (const b of evalS.binsOurs) if (b.n) maxErr = Math.max(maxErr, b.sum / b.n);
+  for (const b of evalS.binsWG)   if (b.n) maxErr = Math.max(maxErr, b.sum / b.n);
+  for (let y = 0; y < BINS; y++) {
+    for (let x = 0; x < BINS; x++) {
+      // Flip y so screen-up = heatmap-top (pitch up/down feels natural)
+      const b = bins[(BINS - 1 - y) * BINS + x];
+      if (!b.n) {
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+      } else {
+        const t = Math.min(1, (b.sum / b.n) / maxErr);
+        const hue = (1 - t) * 135;            // 135 green → 0 red
+        const light = 45 + (1 - t) * 10;
+        ctx.fillStyle = `hsl(${hue.toFixed(0)}, 70%, ${light.toFixed(0)}%)`;
+      }
+      ctx.fillRect(x * cw, y * ch, cw - 1, ch - 1);
+    }
+  }
+}
 
 // UI knobs
 let usePose = true;
@@ -918,6 +1015,38 @@ document.addEventListener("click", (e) => {
   if (e.target && e.target.closest(".controls, .pip, .click-anywhere, .gaze-marker")) return;
   if (!curFeat) return;
 
+  // ---- Online eval: score each model BEFORE it sees this click ----
+  // Our model: uses current (pre-refit) weights
+  if (wx && wy) {
+    const ex = e.clientX - dot(curFeat, wx);
+    const ey = e.clientY - dot(curFeat, wy);
+    const err = Math.hypot(ex, ey);
+    evalS.streamOurs.sum += err;
+    evalS.streamOurs.n++;
+    if (curPose) {
+      const bi = binIdx(curPose.yaw, curPose.pitch);
+      evalS.binsOurs[bi].sum += err;
+      evalS.binsOurs[bi].n++;
+    }
+  }
+  // WebGazer: its live prediction at the moment of click is exactly what it
+  // would have said without being trained on this click, since WG updates
+  // its model on the click event itself (after the listener returns).
+  if (wg.started && wg.lastXY) {
+    const ex = e.clientX - wg.lastXY.x;
+    const ey = e.clientY - wg.lastXY.y;
+    const err = Math.hypot(ex, ey);
+    evalS.streamWG.sum += err;
+    evalS.streamWG.n++;
+    if (curPose) {
+      const bi = binIdx(curPose.yaw, curPose.pitch);
+      evalS.binsWG[bi].sum += err;
+      evalS.binsWG[bi].n++;
+    }
+  }
+  refreshEvalUI();
+
+  // ---- Store the training sample + refit ----
   const f = new Float32Array(curFeat); // snapshot (curFeat is reused next frame)
   samples.X.push(f);
   samples.ys.push(e.clientX);
@@ -926,12 +1055,10 @@ document.addEventListener("click", (e) => {
 
   document.getElementById("n-samples").textContent = samples.X.length;
 
-  // Mark the calibration dot as "done" if we hit one
   if (e.target && e.target.classList.contains("calib-dot")) {
     e.target.classList.add("done");
   }
 
-  // Refit if we have enough samples and pipeline supports it
   if (samples.X.length >= 8) refit();
 }, true);
 
@@ -940,11 +1067,16 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   samples.ys.length = 0;
   samples.yt.length = 0;
   samples.clicks.length = 0;
+  if (samples.wgPreds) samples.wgPreds.length = 0;
   wx = wy = null;
   document.getElementById("n-samples").textContent = "0";
   document.getElementById("mse-ours").textContent = "—";
-  document.getElementById("mse-wg").textContent   = "—";
   document.querySelectorAll(".calib-dot.done").forEach(d => d.classList.remove("done"));
+  // Reset WebGazer's stored samples too, so the comparison starts equal.
+  if (typeof webgazer !== "undefined" && wg.started) {
+    try { webgazer.clearData(); } catch (e) {}
+  }
+  resetEval();
 });
 document.getElementById("btn-refit").addEventListener("click", refit);
 
@@ -1040,23 +1172,7 @@ function refit() {
   const rmseAvg = (rmseX + rmseY) / 2;
   document.getElementById("mse-ours").textContent = rmseAvg.toFixed(0) + " px";
 
-  // Also compute WebGazer MSE on our click history (approx — we don't
-  // have its per-click prediction at the moment of click, so we reuse
-  // the most recent live prediction at each sample's click; to do this
-  // properly we'd snapshot wg.lastXY at click time. Left as a caveat.)
-  if (samples.wgPreds && samples.wgPreds.length === n) {
-    let wx2 = 0, wy2 = 0, cnt = 0;
-    for (let i = 0; i < n; i++) {
-      const p = samples.wgPreds[i];
-      if (!p) continue;
-      const ex = samples.ys[i] - p.x, ey = samples.yt[i] - p.y;
-      wx2 += ex * ex; wy2 += ey * ey; cnt++;
-    }
-    if (cnt) {
-      const r = (Math.sqrt(wx2 / cnt) + Math.sqrt(wy2 / cnt)) / 2;
-      document.getElementById("mse-wg").textContent = r.toFixed(0) + " px";
-    }
-  }
+  // WG eval is now handled online in the click handler (evalS.streamWG).
 }
 
 // Solve A x = b with plain Gaussian elimination + partial pivoting.
