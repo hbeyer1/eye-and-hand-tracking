@@ -165,30 +165,38 @@
     -webkit-backdrop-filter: blur(8px);
   }
 
-  /* Head point-cloud widget, bottom-left */
+  /* Head point-cloud — fills the viewport behind the UI as a watermark */
   .headviz {
-    position: fixed; left: 16px; bottom: 16px;
-    z-index: 15;
-    background: var(--panel);
-    border: 1px solid var(--hairline);
-    border-radius: 12px;
-    padding: 8px;
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    position: fixed; inset: 0;
+    z-index: 2;
+    pointer-events: none;
   }
   .headviz canvas {
     display: block;
-    width: 200px; height: 200px;
-    background: var(--bg);
-    border-radius: 8px;
+    width: 100%; height: 100%;
+    background: transparent;
   }
-  .headviz .hud {
-    display: flex; gap: 14px; justify-content: center;
-    font-family: ui-monospace, Menlo, monospace;
-    font-size: 10px; color: var(--muted);
-    margin-top: 4px;
+
+  /* Red lasers from each iris to the live gaze prediction */
+  .laser {
+    position: fixed;
+    left: 0; top: 0;
+    height: 4px;
+    background: linear-gradient(90deg,
+      rgba(255,40,40,0) 0%,
+      rgba(255,90,90,0.98) 12%,
+      rgba(255,20,20,1) 50%,
+      rgba(255,90,90,0.98) 88%,
+      rgba(255,40,40,0) 100%);
+    box-shadow: 0 0 10px #ff2020, 0 0 24px rgba(255,40,40,0.55);
+    transform-origin: 0 50%;
+    pointer-events: none;
+    z-index: 3;
+    opacity: 0;
+    border-radius: 2px;
+    will-change: transform, width, opacity;
   }
-  .headviz .hud .k { color: var(--text); }
+  .laser.on { opacity: 0.95; }
 </style>
 </head>
 <body>
@@ -282,15 +290,14 @@
 
 <div class="click-anywhere">Click anywhere to add a calibration sample</div>
 
-<!-- Head point-cloud mini-view -->
+<!-- Head point-cloud watermark (fullscreen, behind UI) -->
 <div class="headviz">
-  <canvas id="headviz-canvas" width="400" height="400"></canvas>
-  <div class="hud">
-    <span class="k">yaw</span>  <span id="hv-yaw">—</span>
-    <span class="k">pitch</span><span id="hv-pitch">—</span>
-    <span class="k">roll</span> <span id="hv-roll">—</span>
-  </div>
+  <canvas id="headviz-canvas"></canvas>
 </div>
+
+<!-- Red lasers from each eye to the current gaze prediction -->
+<div class="laser" id="laser-l"></div>
+<div class="laser" id="laser-r"></div>
 
 <script type="module">
 import * as THREE from "three";
@@ -362,181 +369,277 @@ let poseScale = 1.0;
 let lambda = Math.pow(10, -0.3);
 
 // ============================================================
-// Head point-cloud mini-view (THREE.js)
+// Head point-cloud watermark (THREE.js) — dense stippled face
+// ported from index-v2.html, rendered at fullscreen behind the UI.
 // ============================================================
 const headViz = {
   renderer: null,
   scene: null,
   camera: null,
-  allPoints: null,     // THREE.Points for full face mesh
-  eyePoints: null,     // THREE.Points for highlighted eye contours
-  irisRingPoints: null,// THREE.Points for iris ring (blue)
-  pupilPoints: null,   // THREE.Points for pupil centers (yellow)
-  arrow: null,         // forward-direction arrow from head center
-  positions: null,     // Float32Array buffer for face mesh
-  eyePositions: null,
-  irisRingPositions: null,
-  pupilPositions: null,
-  nFace: 0,
-  eyeIdxList: null,
-  irisRingIdxList: null,
-  pupilIdxList: null,
+  facePoints: null,
+  irisRingPoints: null,
+  pupilPoints: null,
+  faceDefs: null,
+  irisDefs: null,
+  pupilDefs: null,
+  eyeScreenL: null,    // {x, y} — page coords of left pupil
+  eyeScreenR: null,
+  tmpVec: null,
   initialized: false,
 };
+
+// ----- v2-style sample builders (slightly reduced density for perf) -----
+function rand(r) { return (Math.random() - 0.5) * 2 * r; }
+const IRIS_RING_LANDMARKS  = new Set([469, 470, 471, 472, 474, 475, 476, 477]);
+const IRIS_PUPIL_LANDMARKS = new Set([468, 473]);
+const ALL_IRIS_LANDMARKS   = new Set([...IRIS_RING_LANDMARKS, ...IRIS_PUPIL_LANDMARKS]);
+
+function buildFaceSampleDefs() {
+  const defs = [];
+  const N_LM = 478;
+  const contourSets = [
+    FaceLandmarker.FACE_LANDMARKS_FACE_OVAL,
+    FaceLandmarker.FACE_LANDMARKS_LEFT_EYE,
+    FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE,
+    FaceLandmarker.FACE_LANDMARKS_LEFT_EYEBROW,
+    FaceLandmarker.FACE_LANDMARKS_RIGHT_EYEBROW,
+    FaceLandmarker.FACE_LANDMARKS_LIPS,
+  ];
+  const contourLM = new Set();
+  for (const set of contourSets) for (const e of set) { contourLM.add(e.start); contourLM.add(e.end); }
+
+  for (let i = 0; i < N_LM; i++) {
+    if (ALL_IRIS_LANDMARKS.has(i)) continue;
+    const isContour = contourLM.has(i);
+    const N  = isContour ? 220 : 40;
+    const r0 = isContour ? 0.010 : 0.007;
+    for (let n = 0; n < N; n++) {
+      defs.push({ type: "point", idx: i, ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
+    }
+  }
+  for (const e of FaceLandmarker.FACE_LANDMARKS_TESSELATION) {
+    if (ALL_IRIS_LANDMARKS.has(e.start) || ALL_IRIS_LANDMARKS.has(e.end)) continue;
+    const N = 35, r0 = 0.005;
+    for (let n = 0; n < N; n++) {
+      defs.push({ type: "edge", a: e.start, b: e.end, t: Math.random(),
+                  ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
+    }
+  }
+  for (const set of contourSets) {
+    for (const e of set) {
+      const N = 150, r0 = 0.0025;
+      for (let n = 0; n < N; n++) {
+        defs.push({ type: "edge", a: e.start, b: e.end, t: Math.random(),
+                    ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
+      }
+    }
+  }
+  return defs;
+}
+function buildIrisRingDefs() {
+  const defs = [];
+  const N_PER_EYE = 1400, INNER = 0.40, OUTER = 1.10;
+  for (const side of ["left", "right"]) {
+    for (let n = 0; n < N_PER_EYE; n++) {
+      const u = Math.random();
+      let rNorm = Math.sqrt(INNER*INNER + u * (OUTER*OUTER - INNER*INNER));
+      rNorm += (Math.random() - 0.5) * 0.18;
+      defs.push({ side, angle: Math.random() * Math.PI * 2, rNorm,
+                  ox: rand(0.0028), oy: rand(0.0028), oz: rand(0.001) });
+    }
+  }
+  return defs;
+}
+function buildPupilDefs() {
+  const defs = [];
+  const N_PER_EYE = 500, PUPIL_FRAC = 0.42;
+  for (const side of ["left", "right"]) {
+    for (let n = 0; n < N_PER_EYE; n++) {
+      const u = Math.random();
+      let rNorm = Math.sqrt(u) * PUPIL_FRAC;
+      rNorm += (Math.random() - 0.5) * 0.10;
+      if (rNorm < 0) rNorm = -rNorm;
+      defs.push({ side, angle: Math.random() * Math.PI * 2, rNorm,
+                  ox: rand(0.0018), oy: rand(0.0018), oz: rand(0.001) });
+    }
+  }
+  return defs;
+}
+
+function makePointsBuffer(count) {
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+  return geom;
+}
+
+// Laser line DOM refs — origin is each pupil's projected screen position,
+// tip is our model's current predicted gaze (or WebGazer's if ours hasn't
+// trained yet).
+const laserElL = document.getElementById("laser-l");
+const laserElR = document.getElementById("laser-r");
+function positionLaser(el, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  const ang = Math.atan2(dy, dx);
+  el.style.transform = `translate(${x1}px, ${y1}px) rotate(${ang}rad)`;
+  el.style.width = len + "px";
+}
+function updateLasers() {
+  const eL = headViz.eyeScreenL, eR = headViz.eyeScreenR;
+  if (!eL || !eR) { laserElL.classList.remove("on"); laserElR.classList.remove("on"); return; }
+  // Target: our model's prediction if we have one, else WebGazer, else nothing
+  let tx = null, ty = null;
+  if (wx && wy && curFeat) {
+    tx = dot(curFeat, wx);
+    ty = dot(curFeat, wy);
+  } else if (wg.started && wg.lastXY) {
+    tx = wg.lastXY.x; ty = wg.lastXY.y;
+  }
+  if (tx === null) { laserElL.classList.remove("on"); laserElR.classList.remove("on"); return; }
+  positionLaser(laserElL, eL.x, eL.y, tx, ty);
+  positionLaser(laserElR, eR.x, eR.y, tx, ty);
+  laserElL.classList.add("on");
+  laserElR.classList.add("on");
+}
 
 function initHeadViz() {
   if (headViz.initialized) return;
   const canvas = document.getElementById("headviz-canvas");
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-  renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(200, 200, false);
-  renderer.setClearColor(0xf4f3ef, 1);   // match page background (cream)
-
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  renderer.setClearColor(0xf4f3ef, 0); // transparent — page cream shows through
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xf4f3ef);
-  const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 10);
-  camera.position.set(0, 0, 1.6);
+
+  const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.01, 100);
+  camera.position.set(0, 0, 2.2);
   camera.lookAt(0, 0, 0);
 
-  // Palette matches index-v2.html:
-  //   face mesh     → charcoal 0x1a1a1a at low opacity
-  //   iris ring     → blue     0x1d4ed8
-  //   pupil centers → yellow   0xeab308
-  // Eye-contour landmarks stay charcoal but a touch more present so
-  // the eyes read as "eyes" even before iris/pupil colours land.
+  function matFn(size, opacity, color) {
+    return new THREE.PointsMaterial({
+      color, size, sizeAttenuation: true,
+      transparent: true, opacity, depthWrite: false,
+    });
+  }
 
-  // Full face mesh — subtle charcoal dots
-  const N_FACE = 478;
-  const posFace = new Float32Array(N_FACE * 3);
-  const geoFace = new THREE.BufferGeometry();
-  geoFace.setAttribute("position", new THREE.BufferAttribute(posFace, 3));
-  const matFace = new THREE.PointsMaterial({
-    color: 0x1a1a1a, size: 0.006, sizeAttenuation: true,
-    transparent: true, opacity: 0.35,
-  });
-  const allPoints = new THREE.Points(geoFace, matFace);
-  allPoints.frustumCulled = false;
-  scene.add(allPoints);
+  // Build (and store) all sample definitions
+  const faceDefs  = buildFaceSampleDefs();
+  const irisDefs  = buildIrisRingDefs();
+  const pupilDefs = buildPupilDefs();
 
-  // Eye contour landmarks (still charcoal, but stronger)
-  const EYE_IDX = [
-    33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246,
-    362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398,
-  ];
-  const posEye = new Float32Array(EYE_IDX.length * 3);
-  const geoEye = new THREE.BufferGeometry();
-  geoEye.setAttribute("position", new THREE.BufferAttribute(posEye, 3));
-  const matEye = new THREE.PointsMaterial({
-    color: 0x1a1a1a, size: 0.009, sizeAttenuation: true,
-    transparent: true, opacity: 0.75,
-  });
-  const eyePoints = new THREE.Points(geoEye, matEye);
-  eyePoints.frustumCulled = false;
-  scene.add(eyePoints);
+  const facePoints = new THREE.Points(
+    makePointsBuffer(faceDefs.length),
+    matFn(0.0022, 0.10, 0x1a1a1a)
+  );
+  facePoints.frustumCulled = false;
+  scene.add(facePoints);
 
-  // Iris ring — blue
-  const IRIS_RING_IDX = [469, 470, 471, 472, 474, 475, 476, 477];
-  const posIrisRing = new Float32Array(IRIS_RING_IDX.length * 3);
-  const geoIrisRing = new THREE.BufferGeometry();
-  geoIrisRing.setAttribute("position", new THREE.BufferAttribute(posIrisRing, 3));
-  const matIrisRing = new THREE.PointsMaterial({
-    color: 0x1d4ed8, size: 0.015, sizeAttenuation: true,
-    transparent: true, opacity: 0.9,
-  });
-  const irisRingPoints = new THREE.Points(geoIrisRing, matIrisRing);
+  const irisRingPoints = new THREE.Points(
+    makePointsBuffer(irisDefs.length),
+    matFn(0.0028, 0.35, 0x1d4ed8)
+  );
   irisRingPoints.frustumCulled = false;
   scene.add(irisRingPoints);
 
-  // Pupil centers — yellow, a bit bigger so they stand out
-  const PUPIL_IDX = [468, 473];
-  const posPupil = new Float32Array(PUPIL_IDX.length * 3);
-  const geoPupil = new THREE.BufferGeometry();
-  geoPupil.setAttribute("position", new THREE.BufferAttribute(posPupil, 3));
-  const matPupil = new THREE.PointsMaterial({
-    color: 0xeab308, size: 0.020, sizeAttenuation: true,
-  });
-  const pupilPoints = new THREE.Points(geoPupil, matPupil);
+  const pupilPoints = new THREE.Points(
+    makePointsBuffer(pupilDefs.length),
+    matFn(0.0030, 0.55, 0xeab308)
+  );
   pupilPoints.frustumCulled = false;
   scene.add(pupilPoints);
 
-  // Forward-direction arrow — muted charcoal so it doesn't compete with the
-  // eye colours. This shows the user's current viewing direction (yaw/pitch).
-  const arrow = new THREE.ArrowHelper(
-    new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0),
-    0.45, 0x4a4a48, 0.12, 0.06
-  );
-  scene.add(arrow);
-
   Object.assign(headViz, {
     renderer, scene, camera,
-    allPoints, eyePoints, irisRingPoints, pupilPoints, arrow,
-    positions: posFace, eyePositions: posEye,
-    irisRingPositions: posIrisRing, pupilPositions: posPupil,
-    nFace: N_FACE, eyeIdxList: EYE_IDX,
-    irisRingIdxList: IRIS_RING_IDX, pupilIdxList: PUPIL_IDX,
+    facePoints, irisRingPoints, pupilPoints,
+    faceDefs, irisDefs, pupilDefs,
+    tmpVec: new THREE.Vector3(),
     initialized: true,
+  });
+
+  window.addEventListener("resize", () => {
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
   });
 }
 
-// Update the point cloud from the current frame's landmarks + render
 function updateHeadViz(lm, pose) {
   if (!headViz.initialized) return;
   if (!lm) { headViz.renderer.render(headViz.scene, headViz.camera); return; }
 
-  // MediaPipe landmark positions are normalized image coords; y goes down.
-  // Convert to a centered 3D frame: x ∈ [-0.5, 0.5], y flipped, z depth.
-  const posF = headViz.positions;
-  for (let i = 0; i < headViz.nFace; i++) {
-    const l = lm[i];
-    if (!l) continue;
-    posF[i * 3 + 0] = (l.x - 0.5);
-    posF[i * 3 + 1] = (0.5 - l.y);
-    posF[i * 3 + 2] = -l.z * 0.8;
-  }
-  headViz.allPoints.geometry.attributes.position.needsUpdate = true;
+  // Match v2's coordinate frame: wider face via video aspect
+  const aspect = (video.videoWidth || 16) / (video.videoHeight || 9);
+  const FSCALE = 0.9;
+  const ZS = aspect * 1.8;
 
-  const posE = headViz.eyePositions;
-  for (let k = 0; k < headViz.eyeIdxList.length; k++) {
-    const i = headViz.eyeIdxList[k], l = lm[i];
-    if (!l) continue;
-    posE[k * 3 + 0] = (l.x - 0.5);
-    posE[k * 3 + 1] = (0.5 - l.y);
-    posE[k * 3 + 2] = -l.z * 0.8;
+  // --- writeLandmarkSamples equivalent ---
+  const arrF = headViz.facePoints.geometry.attributes.position.array;
+  const defsF = headViz.faceDefs;
+  for (let i = 0; i < defsF.length; i++) {
+    const d = defsF[i];
+    let px, py, pz;
+    if (d.type === "point") {
+      const p = lm[d.idx];
+      px = p.x; py = p.y; pz = p.z;
+    } else {
+      const a = lm[d.a], b = lm[d.b];
+      const t = d.t, omt = 1 - t;
+      px = a.x * omt + b.x * t;
+      py = a.y * omt + b.y * t;
+      pz = a.z * omt + b.z * t;
+    }
+    arrF[i*3+0] = (0.5 - px) * FSCALE * aspect + d.ox;
+    arrF[i*3+1] = (0.5 - py) * FSCALE + d.oy;
+    arrF[i*3+2] = -pz * FSCALE * ZS / 1.8 + d.oz;
   }
-  headViz.eyePoints.geometry.attributes.position.needsUpdate = true;
+  headViz.facePoints.geometry.attributes.position.needsUpdate = true;
 
-  const posR = headViz.irisRingPositions;
-  for (let k = 0; k < headViz.irisRingIdxList.length; k++) {
-    const i = headViz.irisRingIdxList[k], l = lm[i];
-    if (!l) continue;
-    posR[k * 3 + 0] = (l.x - 0.5);
-    posR[k * 3 + 1] = (0.5 - l.y);
-    posR[k * 3 + 2] = -l.z * 0.8;
+  // --- Radial iris / pupil samples ---
+  const leftCenter  = lm[468], rightCenter = lm[473];
+  function eyeRadii(center, ringIdxs) {
+    let rx = 0, ry = 0;
+    for (const i of ringIdxs) {
+      rx = Math.max(rx, Math.abs(lm[i].x - center.x));
+      ry = Math.max(ry, Math.abs(lm[i].y - center.y));
+    }
+    return { rx, ry };
   }
-  headViz.irisRingPoints.geometry.attributes.position.needsUpdate = true;
+  const lR = eyeRadii(leftCenter,  [469, 470, 471, 472]);
+  const rR = eyeRadii(rightCenter, [474, 475, 476, 477]);
 
-  const posP = headViz.pupilPositions;
-  for (let k = 0; k < headViz.pupilIdxList.length; k++) {
-    const i = headViz.pupilIdxList[k], l = lm[i];
-    if (!l) continue;
-    posP[k * 3 + 0] = (l.x - 0.5);
-    posP[k * 3 + 1] = (0.5 - l.y);
-    posP[k * 3 + 2] = -l.z * 0.8;
+  function writeRadial(points, defs) {
+    const arr = points.geometry.attributes.position.array;
+    for (let i = 0; i < defs.length; i++) {
+      const d = defs[i];
+      const isLeft = d.side === "left";
+      const c = isLeft ? leftCenter : rightCenter;
+      const r = isLeft ? lR : rR;
+      const px = c.x + Math.cos(d.angle) * r.rx * d.rNorm + d.ox;
+      const py = c.y + Math.sin(d.angle) * r.ry * d.rNorm + d.oy;
+      const pz = c.z + d.oz;
+      arr[i*3+0] = (0.5 - px) * FSCALE * aspect;
+      arr[i*3+1] = (0.5 - py) * FSCALE;
+      arr[i*3+2] = -pz * FSCALE * ZS / 1.8;
+    }
+    points.geometry.attributes.position.needsUpdate = true;
   }
-  headViz.pupilPoints.geometry.attributes.position.needsUpdate = true;
+  writeRadial(headViz.irisRingPoints, headViz.irisDefs);
+  writeRadial(headViz.pupilPoints,    headViz.pupilDefs);
 
-  // Head-forward arrow: origin at face midpoint, direction from yaw/pitch.
-  if (pose) {
-    const midX = (lm[33].x + lm[263].x) / 2 - 0.5;
-    const midY = 0.5 - (lm[33].y + lm[263].y) / 2;
-    const midZ = -(lm[33].z + lm[263].z) / 2 * 0.8;
-    headViz.arrow.position.set(midX, midY, midZ);
-    const fx = Math.sin(pose.yaw) * Math.cos(pose.pitch);
-    const fy = -Math.sin(pose.pitch);
-    const fz = Math.cos(pose.yaw) * Math.cos(pose.pitch);
-    headViz.arrow.setDirection(new THREE.Vector3(fx, fy, fz).normalize());
-    headViz.arrow.setLength(0.45, 0.12, 0.06);
+  // --- Project pupil centers to screen coords (page pixels), for laser origins ---
+  const cam = headViz.camera;
+  function projPupil(center) {
+    const lx = (0.5 - center.x) * FSCALE * aspect;
+    const ly = (0.5 - center.y) * FSCALE;
+    const lz = -center.z * FSCALE * ZS / 1.8;
+    const v = headViz.tmpVec.set(lx, ly, lz).project(cam);
+    return {
+      x: (v.x * 0.5 + 0.5) * window.innerWidth,
+      y: (-v.y * 0.5 + 0.5) * window.innerHeight,
+    };
   }
+  headViz.eyeScreenL = projPupil(leftCenter);
+  headViz.eyeScreenR = projPupil(rightCenter);
 
   headViz.renderer.render(headViz.scene, headViz.camera);
 }
@@ -598,15 +701,9 @@ function loop() {
     const res = faceLandmarker.detectForVideo(video, now);
     computeFeatures(res);
     predictAndDraw();
-    // Mirror the head-pose readout into the mini-viz HUD, then draw it.
-    if (curPose) {
-      const toDeg = 180 / Math.PI;
-      document.getElementById("hv-yaw")  .textContent = (curPose.yaw   * toDeg).toFixed(0) + "°";
-      document.getElementById("hv-pitch").textContent = (curPose.pitch * toDeg).toFixed(0) + "°";
-      document.getElementById("hv-roll") .textContent = (curPose.roll  * toDeg).toFixed(0) + "°";
-    }
     const lm = res.faceLandmarks && res.faceLandmarks[0];
     updateHeadViz(lm, curPose);
+    updateLasers();
   }
   requestAnimationFrame(loop);
 }
