@@ -54,7 +54,6 @@
   .pip .patches {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: auto auto;
     gap: 4px 8px;
     align-content: center;
   }
@@ -64,11 +63,15 @@
     background: #000; border-radius: 4px;
     display: block;
   }
+  .pip .patches canvas.old { outline: 2px solid #6aa3ff; outline-offset: 1px; }
+  .pip .patches canvas.new { outline: 2px solid #ff5a3a; outline-offset: 1px; }
   .pip .patches .lbl {
     font-size: 10px; color: var(--muted);
     letter-spacing: 0.04em; text-transform: uppercase;
     grid-column: 1 / 3;
+    margin-top: 2px;
   }
+  .pip .patches .lbl:first-child { margin-top: 0; }
 
   /* Control panel, top-right */
   .controls {
@@ -167,9 +170,12 @@
 <div class="pip">
   <video id="webcam" autoplay playsinline muted></video>
   <div class="patches">
-    <div class="lbl">rectified (features)</div>
-    <canvas id="patch-left"  width="40" height="20"></canvas>
-    <canvas id="patch-right" width="40" height="20"></canvas>
+    <div class="lbl">old (axis-aligned) · reference</div>
+    <canvas class="old" id="old-patch-left"  width="40" height="20"></canvas>
+    <canvas class="old" id="old-patch-right" width="40" height="20"></canvas>
+    <div class="lbl">new (rectified) · features</div>
+    <canvas class="new" id="patch-left"  width="40" height="20"></canvas>
+    <canvas class="new" id="patch-right" width="40" height="20"></canvas>
   </div>
 </div>
 
@@ -259,6 +265,10 @@ const patchL   = document.getElementById("patch-left");
 const patchR   = document.getElementById("patch-right");
 const pLctx    = patchL.getContext("2d", { willReadFrequently: true });
 const pRctx    = patchR.getContext("2d", { willReadFrequently: true });
+const oldPatchL = document.getElementById("old-patch-left");
+const oldPatchR = document.getElementById("old-patch-right");
+const oLctx     = oldPatchL.getContext("2d");
+const oRctx     = oldPatchR.getContext("2d");
 const markerOurs = document.getElementById("marker-ours");
 const markerWG   = document.getElementById("marker-wg");
 const calibGrid  = document.getElementById("calib-grid");
@@ -378,6 +388,9 @@ function computeFeatures(res) {
   const W = video.videoWidth, H = video.videoHeight;
   extractRectifiedPatch(lm, LEFT_IDX,  pLctx, W, H);
   extractRectifiedPatch(lm, RIGHT_IDX, pRctx, W, H);
+  // Also extract the old axis-aligned crops (reference only, not used as features)
+  extractAxisAlignedPatch(lm, LEFT_IDX,  oLctx, W, H);
+  extractAxisAlignedPatch(lm, RIGHT_IDX, oRctx, W, H);
 
   // Grab grayscale pixel features from both patches
   const feat = new Float32Array(usePose ? D_WITH_POSE : D_NO_POSE);
@@ -415,6 +428,30 @@ function computeFeatures(res) {
   }
 
   curFeat = feat;
+}
+
+function extractAxisAlignedPatch(lm, idx, ctx, W, H) {
+  // Mirror of what WebGazer does today: axis-aligned bounding box around the
+  // eye-corner + lid landmarks, drawn to the patch canvas with the same 2:1
+  // aspect ratio as the rectified version.
+  const p = (i) => ({ x: lm[i].x * W, y: lm[i].y * H });
+  const outer = p(idx.outer), inner = p(idx.inner);
+  const top = p(idx.top),     bot   = p(idx.bot);
+  const xs = [outer.x, inner.x, top.x, bot.x];
+  const ys = [outer.y, inner.y, top.y, bot.y];
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const rawW = Math.max(maxX - minX, 40);
+  const padW = rawW * 1.35;
+  const padH = padW * (PATCH_H / PATCH_W);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, PATCH_W, PATCH_H);
+  ctx.drawImage(video,
+    cx - padW / 2, cy - padH / 2, padW, padH,
+    0, 0, PATCH_W, PATCH_H);
+  ctx.restore();
 }
 
 function extractRectifiedPatch(lm, idx, ctx, W, H) {
