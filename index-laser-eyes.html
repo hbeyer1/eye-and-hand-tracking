@@ -749,6 +749,14 @@
       </span>
       <span class="value" id="laser-autoaim-val">on</span>
     </div>
+    <div class="row">
+      <span class="label">
+        <input type="checkbox" id="laser-strongaim"
+               style="vertical-align:middle;margin-right:4px;accent-color:var(--accent);" />
+        Strong auto-aim
+      </span>
+      <span class="value" id="laser-strongaim-val">off</span>
+    </div>
     <div class="hint">
       Dogs appear on screen. Look at them — red lasers shoot from your eyes. Hold your gaze on a dog for ~0.4s to vaporize it. Both sources calibrate from clicks; switch to WebGazer to compare. Press <strong>L</strong> to toggle.
     </div>
@@ -1871,7 +1879,9 @@ const laserGame = {
   // quadratically with closeness, so the cursor still moves naturally
   // near the edge of the snap zone and locks on tight near the center.
   autoAim: true,
+  strongAim: false,    // toggled via "Strong" checkbox; huge radius + hard snap
   snapRadius: 130,
+  snapRadiusStrong: 220,
   snapMax: 0.95,
 };
 
@@ -1935,6 +1945,10 @@ document.getElementById("laser-gaze-source").addEventListener("change", (e) => {
 document.getElementById("laser-autoaim").addEventListener("change", (e) => {
   laserGame.autoAim = e.target.checked;
   document.getElementById("laser-autoaim-val").textContent = e.target.checked ? "on" : "off";
+});
+document.getElementById("laser-strongaim").addEventListener("change", (e) => {
+  laserGame.strongAim = e.target.checked;
+  document.getElementById("laser-strongaim-val").textContent = e.target.checked ? "on" : "off";
 });
 
 const DOG_SVG = `
@@ -2066,7 +2080,8 @@ function tickLaserGame() {
   // for laser positioning and hit detection, so the EMA keeps tracking
   // the real gaze underneath the snap.
   if (gazeValid && laserGame.autoAim && laserGame.dogs.length) {
-    let closest = null, closestD2 = laserGame.snapRadius * laserGame.snapRadius;
+    const radius = laserGame.strongAim ? laserGame.snapRadiusStrong : laserGame.snapRadius;
+    let closest = null, closestD2 = radius * radius;
     for (const d of laserGame.dogs) {
       if (d.dying) continue;
       const dx = gx - d.x, dy = gy - d.y;
@@ -2074,11 +2089,18 @@ function tickLaserGame() {
       if (d2 < closestD2) { closestD2 = d2; closest = d; }
     }
     if (closest) {
-      const dist = Math.sqrt(closestD2);
-      const t = 1 - dist / laserGame.snapRadius;   // 0 at edge, 1 at center
-      const pull = Math.min(laserGame.snapMax, t * t + 0.12);
-      gx += pull * (closest.x - gx);
-      gy += pull * (closest.y - gy);
+      if (laserGame.strongAim) {
+        // Hard snap — any dog in range, laser locks to its center.
+        gx = closest.x;
+        gy = closest.y;
+      } else {
+        // Soft snap — pull grows quadratically as gaze approaches center.
+        const dist = Math.sqrt(closestD2);
+        const t = 1 - dist / radius;
+        const pull = Math.min(laserGame.snapMax, t * t + 0.12);
+        gx += pull * (closest.x - gx);
+        gy += pull * (closest.y - gy);
+      }
     }
   }
 
