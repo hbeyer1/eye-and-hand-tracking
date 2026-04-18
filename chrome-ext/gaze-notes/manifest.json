@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Gaze Notes",
+  "version": "0.1.0",
+  "description": "Gaze-aware passive note-taking — Phase 1: shared gaze tracking across tabs.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "offscreen",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Gaze Notes"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "vendor/mediapipe/**",
+        "lib/**",
+        "offscreen.html"
+      ],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ]
+}

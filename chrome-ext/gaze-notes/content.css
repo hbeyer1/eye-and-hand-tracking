@@ -1,0 +1,15 @@
+.gaze-notes-dot {
+  position: fixed !important;
+  left: 0;
+  top:  0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(234, 179, 8, 0.35);   /* same yellow as v2 pupils */
+  border: 2px solid #eab308;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 2147483647;
+  box-shadow: 0 0 12px rgba(234, 179, 8, 0.55);
+  will-change: transform, left, top;
+}
