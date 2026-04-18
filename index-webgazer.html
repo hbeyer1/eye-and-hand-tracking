@@ -180,30 +180,22 @@
   });
 
   // Start WebGazer
-  webgazer
-    .setRegression("ridge")
-    .setTracker("TFFaceMesh")
-    .setGazeListener((data) => {
-      if (!data) return;
-      hudX.textContent = data.x.toFixed(0);
-      hudY.textContent = data.y.toFixed(0);
-    })
-    .begin()
-    .then(() => {
-      webgazer.showVideo(true);
-      webgazer.showFaceOverlay(true);
-      webgazer.showFaceFeedbackBox(true);
-      webgazer.showPredictionPoints(true);
-      makeDots();
-      loading.remove();
-      intro.hidden = false;
-      hud.hidden = false;
-      clearBtn.hidden = false;
-    })
-    .catch((err) => {
-      loading.textContent = "WebGazer failed to start: " + err.message;
-      console.error(err);
-    });
+  // Minimal start — use all defaults. The fancy toggles come after begin().
+  webgazer.setGazeListener((data, elapsedTime) => {
+    if (!data) return;
+    hudX.textContent = data.x.toFixed(0);
+    hudY.textContent = data.y.toFixed(0);
+  }).begin().then(() => {
+    try { webgazer.showPredictionPoints(true); } catch (e) { console.warn(e); }
+    makeDots();
+    loading.remove();
+    intro.hidden = false;
+    hud.hidden = false;
+    clearBtn.hidden = false;
+  }).catch((err) => {
+    loading.textContent = "WebGazer failed to start: " + (err && err.message ? err.message : err);
+    console.error("WebGazer begin() rejected:", err);
+  });
 </script>
 </body>
 </html>
