@@ -283,6 +283,15 @@ function processEye(lm, idx, oldCtx, newCtx, oldTag, newTag, W, H) {
   const top   = p(idx.top);
   const bot   = p(idx.bot);
 
+  // For both eyes we want the rectified patch to be right-side-up, so we
+  // always treat whichever corner is image-left as the "from" corner —
+  // that keeps the eye axis angle near 0 (instead of ≈π for the right eye,
+  // which would make rotate(-angle) flip the image 180°). The two
+  // rectified patches will be mirror-images of each other, which is fine:
+  // a regression trained on "left-eye" and "right-eye" columns separately
+  // doesn't care, and any downstream model can handle it by flipping one.
+  const [cFrom, cTo] = outer.x < inner.x ? [outer, inner] : [inner, outer];
+
   // ---------- OLD: axis-aligned crop ----------
   // Pad the tight bounding box; keep it consistent in aspect (2:1).
   const xs = [outer.x, inner.x, top.x, bot.x];
@@ -309,13 +318,13 @@ function processEye(lm, idx, oldCtx, newCtx, oldTag, newTag, W, H) {
   oldCtx.restore();
 
   // ---------- NEW: rectified crop ----------
-  // Align so `outer` -> (PATCH_INSET_X, PATCH_H/2), `inner` -> (PATCH_W - PATCH_INSET_X, PATCH_H/2).
-  const midX = (outer.x + inner.x) / 2;
-  const midY = (outer.y + inner.y) / 2;
-  const dx = inner.x - outer.x;
-  const dy = inner.y - outer.y;
+  // Align so cFrom -> (PATCH_INSET_X, PATCH_H/2), cTo -> (PATCH_W - PATCH_INSET_X, PATCH_H/2).
+  const midX = (cFrom.x + cTo.x) / 2;
+  const midY = (cFrom.y + cTo.y) / 2;
+  const dx = cTo.x - cFrom.x;
+  const dy = cTo.y - cFrom.y;
   const eyeLen = Math.hypot(dx, dy);
-  const angle  = Math.atan2(dy, dx);     // radians, image-space
+  const angle  = Math.atan2(dy, dx);     // radians, image-space, ≈0 for both eyes
   const targetLen = PATCH_W - 2 * PATCH_INSET_X;
   const scale = targetLen / eyeLen;
 
