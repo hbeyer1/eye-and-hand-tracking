@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Eye-patch rectification — old vs new crops</title>
+<style>
+  :root {
+    --bg: #f4f3ef;
+    --panel: rgba(255,255,255,0.85);
+    --text: #1a1a1a;
+    --muted: #8a8a86;
+    --hairline: rgba(0,0,0,0.08);
+    --old: #6aa3ff;
+    --new: #ff5a3a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  #loading {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg); z-index: 100;
+    font-size: 13px; color: var(--muted);
+  }
+
+  .stage {
+    position: fixed; inset: 0;
+    display: grid;
+    grid-template-rows: 1fr auto;
+  }
+
+  .video-wrap {
+    position: relative;
+    overflow: hidden;
+    background: #111;
+  }
+  /* Mirror the video for natural display. The overlay we flip the same way
+     so overlay-space matches video-displayed-space. Landmarks we compute in
+     un-mirrored video coords, and either flip once when drawing on the
+     overlay or let the CSS mirror the whole thing. We do the latter. */
+  #webcam, #overlay {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: contain;
+    transform: scaleX(-1);
+  }
+
+  .crops {
+    background: white;
+    border-top: 1px solid var(--hairline);
+    padding: 12px 16px 16px;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 16px;
+    align-items: end;
+  }
+  .crop {
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .crop .label {
+    font-size: 11px; color: var(--muted);
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .crop .label b { color: var(--text); text-transform: none; letter-spacing: 0; }
+  .crop canvas {
+    width: 100%; max-width: 220px;
+    height: auto;
+    image-rendering: pixelated;
+    background: #000;
+    border-radius: 6px;
+    display: block;
+  }
+  .crop.old canvas  { outline: 2px solid var(--old); outline-offset: 2px; }
+  .crop.new canvas  { outline: 2px solid var(--new); outline-offset: 2px; }
+
+  .info {
+    position: fixed; top: 16px; right: 16px;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    padding: 10px 14px;
+    z-index: 20;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    min-width: 180px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .info h1 {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px; margin: 0 0 8px 0; font-weight: 600;
+  }
+  .info .row { display: flex; justify-content: space-between; gap: 16px; }
+  .info .label { color: var(--muted); }
+  .info .legend {
+    display: flex; gap: 12px; margin-top: 10px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 11px;
+  }
+  .info .legend .chip {
+    display: inline-block; width: 10px; height: 10px;
+    border-radius: 2px; margin-right: 5px; vertical-align: middle;
+  }
+
+  .intro {
+    position: fixed; top: 16px; left: 16px;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    padding: 10px 14px;
+    z-index: 20;
+    font-size: 12px; max-width: 380px; line-height: 1.5;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .intro h1 { font-size: 13px; margin: 0 0 6px 0; font-weight: 600; }
+  .intro p { margin: 0; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div id="loading">loading MediaPipe…</div>
+
+<div class="intro">
+  <h1>Eye-patch rectification</h1>
+  <p>
+    Blue boxes show the <b>old</b> axis-aligned crop that WebGazer takes.
+    Red quads show the <b>new</b> rectified region — rotated and scaled
+    to keep the eye in a canonical frame. Tilt your head and watch the
+    bottom panel: old crops jitter and rotate, new ones stay steady.
+  </p>
+</div>
+
+<div class="info">
+  <h1>Head pose</h1>
+  <div class="row"><span class="label">yaw</span>  <span id="yaw">—</span></div>
+  <div class="row"><span class="label">pitch</span><span id="pitch">—</span></div>
+  <div class="row"><span class="label">roll</span> <span id="roll">—</span></div>
+  <div class="legend">
+    <span><span class="chip" style="background:var(--old);"></span>old</span>
+    <span><span class="chip" style="background:var(--new);"></span>new</span>
+  </div>
+</div>
+
+<div class="stage">
+  <div class="video-wrap">
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div class="crops">
+    <div class="crop old">
+      <div class="label">old · <b>left eye</b></div>
+      <canvas id="old-left"  width="120" height="60"></canvas>
+    </div>
+    <div class="crop old">
+      <div class="label">old · <b>right eye</b></div>
+      <canvas id="old-right" width="120" height="60"></canvas>
+    </div>
+    <div class="crop new">
+      <div class="label">new · <b>left eye</b></div>
+      <canvas id="new-left"  width="120" height="60"></canvas>
+    </div>
+    <div class="crop new">
+      <div class="label">new · <b>right eye</b></div>
+      <canvas id="new-right" width="120" height="60"></canvas>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import {
+  FaceLandmarker,
+  FilesetResolver,
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9";
+
+const video   = document.getElementById("webcam");
+const overlay = document.getElementById("overlay");
+const octx    = overlay.getContext("2d");
+const loading = document.getElementById("loading");
+
+const oldL = document.getElementById("old-left");
+const oldR = document.getElementById("old-right");
+const newL = document.getElementById("new-left");
+const newR = document.getElementById("new-right");
+const oldLctx = oldL.getContext("2d");
+const oldRctx = oldR.getContext("2d");
+const newLctx = newL.getContext("2d");
+const newRctx = newR.getContext("2d");
+
+// MediaPipe landmark indices:
+//   Left eye (MediaPipe's "left" = image-left before mirroring):
+//     outer corner 33, inner 133, top 159, bottom 145, pupil 468
+//   Right eye:
+//     inner 362, outer 263, top 386, bottom 374, pupil 473
+const LEFT_EYE_IDX  = { outer: 33,  inner: 133, top: 159, bot: 145, pupil: 468 };
+const RIGHT_EYE_IDX = { inner: 362, outer: 263, top: 386, bot: 374, pupil: 473 };
+
+// Canonical eye-patch shape. The rectified output has the eye corners
+// land at fixed positions; pupils therefore always sit near the center.
+const PATCH_W = 120;
+const PATCH_H = 60;
+const PATCH_INSET_X = 12;  // where the outer corner lands horizontally
+
+let faceLandmarker = null;
+let lastTime = -1;
+
+async function setup() {
+  const fileset = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+  );
+  faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      delegate: "GPU",
+    },
+    outputFaceBlendshapes: false,
+    outputFacialTransformationMatrixes: true,
+    runningMode: "VIDEO",
+    numFaces: 1,
+  });
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: 1280, height: 720 },
+    audio: false,
+  });
+  video.srcObject = stream;
+  await new Promise((r) => (video.onloadedmetadata = r));
+  await video.play();
+
+  // Make the overlay match video intrinsic size so pixel coords line up.
+  overlay.width  = video.videoWidth;
+  overlay.height = video.videoHeight;
+
+  loading.remove();
+  requestAnimationFrame(loop);
+}
+
+function loop() {
+  const now = performance.now();
+  if (video.readyState >= 2 && video.currentTime !== lastTime) {
+    lastTime = video.currentTime;
+    const res = faceLandmarker.detectForVideo(video, now);
+    render(res);
+  }
+  requestAnimationFrame(loop);
+}
+
+function render(res) {
+  const W = video.videoWidth, H = video.videoHeight;
+  octx.clearRect(0, 0, W, H);
+
+  const lm = res.faceLandmarks && res.faceLandmarks[0];
+  if (!lm) return;
+
+  // Head pose readout (just for display; not used in the crops yet)
+  const m = res.facialTransformationMatrixes && res.facialTransformationMatrixes[0];
+  if (m) {
+    const { yaw, pitch, roll } = matrixToEuler(m);
+    document.getElementById("yaw")  .textContent = yaw.toFixed(1)   + "°";
+    document.getElementById("pitch").textContent = pitch.toFixed(1) + "°";
+    document.getElementById("roll") .textContent = roll.toFixed(1)  + "°";
+  }
+
+  // Compute + draw both crops for each eye
+  processEye(lm, LEFT_EYE_IDX,  oldLctx, newLctx, "old-l", "new-l", W, H);
+  processEye(lm, RIGHT_EYE_IDX, oldRctx, newRctx, "old-r", "new-r", W, H);
+}
+
+function processEye(lm, idx, oldCtx, newCtx, oldTag, newTag, W, H) {
+  // Convert normalized landmarks to pixel coords in un-mirrored video space
+  const p = (i) => ({ x: lm[i].x * W, y: lm[i].y * H });
+  const outer = p(idx.outer);
+  const inner = p(idx.inner);
+  const top   = p(idx.top);
+  const bot   = p(idx.bot);
+
+  // ---------- OLD: axis-aligned crop ----------
+  // Pad the tight bounding box; keep it consistent in aspect (2:1).
+  const xs = [outer.x, inner.x, top.x, bot.x];
+  const ys = [outer.y, inner.y, top.y, bot.y];
+  let minX = Math.min(...xs), maxX = Math.max(...xs);
+  let minY = Math.min(...ys), maxY = Math.max(...ys);
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  // Width between eye corners drives how big the box is; pad generously
+  // so blinks / lid motion don't clip.
+  const rawW = Math.max(maxX - minX, 40);
+  const padW = rawW * 1.35;
+  const padH = padW * (PATCH_H / PATCH_W); // same 2:1 aspect as patch
+  const oldRect = {
+    x: cx - padW / 2, y: cy - padH / 2,
+    w: padW, h: padH,
+  };
+  oldCtx.save();
+  oldCtx.setTransform(1, 0, 0, 1, 0, 0);
+  oldCtx.clearRect(0, 0, PATCH_W, PATCH_H);
+  oldCtx.drawImage(video,
+    oldRect.x, oldRect.y, oldRect.w, oldRect.h,
+    0, 0, PATCH_W, PATCH_H);
+  oldCtx.restore();
+
+  // ---------- NEW: rectified crop ----------
+  // Align so `outer` -> (PATCH_INSET_X, PATCH_H/2), `inner` -> (PATCH_W - PATCH_INSET_X, PATCH_H/2).
+  const midX = (outer.x + inner.x) / 2;
+  const midY = (outer.y + inner.y) / 2;
+  const dx = inner.x - outer.x;
+  const dy = inner.y - outer.y;
+  const eyeLen = Math.hypot(dx, dy);
+  const angle  = Math.atan2(dy, dx);     // radians, image-space
+  const targetLen = PATCH_W - 2 * PATCH_INSET_X;
+  const scale = targetLen / eyeLen;
+
+  newCtx.save();
+  newCtx.setTransform(1, 0, 0, 1, 0, 0);
+  newCtx.clearRect(0, 0, PATCH_W, PATCH_H);
+  // Build forward transform: source_video → canonical_patch
+  //   subtract midpoint → rotate by -angle → scale → translate to patch center
+  newCtx.translate(PATCH_W / 2, PATCH_H / 2);
+  newCtx.scale(scale, scale);
+  newCtx.rotate(-angle);
+  newCtx.translate(-midX, -midY);
+  newCtx.drawImage(video, 0, 0);         // whole video; the transform carves out the eye
+  newCtx.restore();
+
+  // ---------- Overlay: show both regions on the main video ----------
+  // Old rect (axis-aligned) — blue
+  octx.lineWidth = 3;
+  octx.strokeStyle = "#6aa3ff";
+  octx.strokeRect(oldRect.x, oldRect.y, oldRect.w, oldRect.h);
+
+  // New quad — red. Invert the forward transform at patch corners to
+  // get the 4 corners of the rectified region back in video space.
+  const cosA = Math.cos(angle), sinA = Math.sin(angle);
+  function invT(cxp, cyp) {
+    // Subtract patch center, undo scale, undo -angle rotation, add midpoint.
+    const ux = (cxp - PATCH_W / 2) / scale;
+    const uy = (cyp - PATCH_H / 2) / scale;
+    // Inverse of rotate(-angle) is rotate(+angle)
+    const rx = ux * cosA - uy * sinA;
+    const ry = ux * sinA + uy * cosA;
+    return { x: rx + midX, y: ry + midY };
+  }
+  const q = [invT(0, 0), invT(PATCH_W, 0), invT(PATCH_W, PATCH_H), invT(0, PATCH_H)];
+  octx.strokeStyle = "#ff5a3a";
+  octx.beginPath();
+  octx.moveTo(q[0].x, q[0].y);
+  for (let i = 1; i < 4; i++) octx.lineTo(q[i].x, q[i].y);
+  octx.closePath();
+  octx.stroke();
+
+  // Small dot on inner corner so orientation is obvious
+  octx.fillStyle = "#ff5a3a";
+  octx.beginPath();
+  octx.arc(inner.x, inner.y, 4, 0, Math.PI * 2);
+  octx.fill();
+}
+
+function matrixToEuler(mat) {
+  // mat is a row-major column-major-style container from MediaPipe.
+  // Use the data array directly; it's row-major 4x4 in column-major order.
+  const m = mat.data;
+  // Standard XYZ extraction
+  const sy = Math.sqrt(m[0] * m[0] + m[1] * m[1]);
+  const singular = sy < 1e-6;
+  let x, y, z;
+  if (!singular) {
+    x = Math.atan2(m[6], m[10]);
+    y = Math.atan2(-m[2], sy);
+    z = Math.atan2(m[1], m[0]);
+  } else {
+    x = Math.atan2(-m[9], m[5]);
+    y = Math.atan2(-m[2], sy);
+    z = 0;
+  }
+  const toDeg = 180 / Math.PI;
+  return { pitch: x * toDeg, yaw: y * toDeg, roll: z * toDeg };
+}
+
+setup().catch((err) => {
+  loading.textContent = "setup failed: " + (err && err.message || err);
+  console.error(err);
+});
+</script>
+</body>
+</html>
