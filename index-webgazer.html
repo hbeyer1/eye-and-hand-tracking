@@ -183,7 +183,7 @@
   // Use TensorFlow.js face-mesh tracker (TFFaceMesh). The default tracker
   // would be MediaPipe's FaceMesh which needs local .binarypb + wasm assets
   // next to webgazer.js that we haven't vendored.
-  webgazer.setTracker("TFFaceMesh");
+  webgazer.setTracker("TFFacemesh");
   webgazer.setGazeListener((data, elapsedTime) => {
     if (!data) return;
     hudX.textContent = data.x.toFixed(0);
