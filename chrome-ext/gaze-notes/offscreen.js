@@ -65,10 +65,13 @@ bootPort.onMessage.addListener((msg) => {
     } catch (e) { console.warn("failed to hydrate state", e); }
   }
   setup().catch(err => {
-    console.error("offscreen setup failed", err);
+    // DOMException doesn't stringify nicely; pull name + message separately.
+    const name = err && err.name    ? err.name    : "Error";
+    const msg  = err && err.message ? err.message : "(no message)";
+    const detail = `${name}: ${msg}`;
+    console.error("offscreen setup failed", detail, err);
     chrome.runtime.sendMessage({
-      from: "offscreen", type: "setupError",
-      error: err && err.message ? err.message : String(err),
+      from: "offscreen", type: "setupError", error: detail,
     }).catch(() => {});
   });
 });
