@@ -35,7 +35,8 @@
       "resources": [
         "vendor/mediapipe/**",
         "lib/**",
-        "offscreen.html"
+        "offscreen.html",
+        "permission.html"
       ],
       "matches": ["http://*/*", "https://*/*"]
     }

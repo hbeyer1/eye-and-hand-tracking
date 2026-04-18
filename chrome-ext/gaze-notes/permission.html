@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Gaze Notes — Camera Permission</title>
+<style>
+  body {
+    margin: 0; padding: 48px 32px;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    background: #f4f3ef; color: #1a1a1a;
+    max-width: 560px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 12px 0; }
+  p  { line-height: 1.55; color: #4a4a48; }
+  button {
+    font: inherit; font-size: 14px; cursor: pointer;
+    background: #1a1a1a; color: #fff; border: none;
+    border-radius: 8px; padding: 10px 16px;
+    margin-top: 8px;
+  }
+  #status { font-family: ui-monospace, Menlo, monospace; font-size: 12px; margin-top: 16px; color: #8a8a86; }
+  #status.ok  { color: #2a7a2a; }
+  #status.err { color: #b91c1c; }
+</style>
+</head>
+<body>
+<h1>Grant camera access</h1>
+<p>Click <b>Grant</b> below. Chrome will prompt you to allow camera access.
+Click <b>Allow</b> in that prompt. This page will stay open while you respond
+(unlike the popup, which would close).</p>
+<button id="grant">Grant camera</button>
+<p id="status"></p>
+<p style="font-size: 12px; color: #8a8a86; margin-top: 32px;">
+If the prompt doesn't appear, check
+<a href="chrome://settings/content/camera" target="_blank">chrome://settings/content/camera</a>
+— if the extension is listed under "Not allowed to use your camera",
+remove it from that list and try again.
+</p>
+<script src="permission.js"></script>
+</body>
+</html>
