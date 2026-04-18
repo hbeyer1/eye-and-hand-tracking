@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Rectified + pose gaze regression — vs. WebGazer</title>
+<style>
+  :root {
+    --bg: #f4f3ef;
+    --panel: rgba(255,255,255,0.85);
+    --text: #1a1a1a;
+    --muted: #8a8a86;
+    --hairline: rgba(0,0,0,0.08);
+    --ours: #111;
+    --wg: #e43b3b;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  #loading {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg); z-index: 100;
+    font-size: 13px; color: var(--muted);
+  }
+
+  /* Small PiP camera + rectified patches, top-left */
+  .pip {
+    position: fixed; top: 16px; left: 16px;
+    z-index: 15;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 10px;
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 10px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .pip video {
+    width: 180px; height: 120px;
+    object-fit: cover; border-radius: 6px;
+    transform: scaleX(-1);
+    background: #111;
+  }
+  .pip .patches {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto;
+    gap: 4px 8px;
+    align-content: center;
+  }
+  .pip .patches canvas {
+    width: 80px; height: 40px;
+    image-rendering: pixelated;
+    background: #000; border-radius: 4px;
+    display: block;
+  }
+  .pip .patches .lbl {
+    font-size: 10px; color: var(--muted);
+    letter-spacing: 0.04em; text-transform: uppercase;
+    grid-column: 1 / 3;
+  }
+
+  /* Control panel, top-right */
+  .controls {
+    position: fixed; top: 16px; right: 16px;
+    z-index: 15;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 14px;
+    width: 280px;
+    font-size: 12px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+  }
+  .controls h1 { margin: 0 0 8px 0; font-size: 13px; font-weight: 600; letter-spacing: 0.01em; }
+  .controls h2 { margin: 10px 0 4px 0; font-size: 11px; font-weight: 600; text-transform: uppercase;
+                 color: var(--muted); letter-spacing: 0.06em; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 4px 0; }
+  .row .label { color: var(--muted); }
+  .row .val { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+  .controls button, .controls select {
+    font: inherit; font-size: 11px; cursor: pointer;
+    border: 1px solid var(--hairline);
+    border-radius: 6px; padding: 4px 8px;
+    background: white; color: var(--text);
+  }
+  .controls button.primary { background: var(--text); color: #fff; border-color: transparent; }
+  .controls button.wide { width: 100%; padding: 6px 8px; }
+  .controls input[type="range"] { width: 100%; accent-color: var(--text); }
+  .controls input[type="checkbox"] { accent-color: var(--text); }
+  .hint { font-size: 11px; color: var(--muted); line-height: 1.45; margin: 4px 0; }
+
+  .legend { display: flex; gap: 12px; margin-top: 6px; }
+  .legend .dot { width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: middle; display: inline-block; }
+  .legend .dot.ours { background: var(--ours); }
+  .legend .dot.wg   { background: var(--wg); }
+
+  /* Live prediction markers */
+  .gaze-marker {
+    position: fixed; width: 22px; height: 22px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 5;
+    display: none;
+    transition: left 90ms linear, top 90ms linear;
+  }
+  .gaze-marker.ours {
+    border: 2px solid var(--ours);
+    background: rgba(0,0,0,0.12);
+  }
+  .gaze-marker.wg {
+    border: 2px solid var(--wg);
+    background: rgba(228,59,59,0.15);
+  }
+  .gaze-marker.visible { display: block; }
+
+  /* Calibration grid — 4x3 click targets */
+  #calib-grid { position: fixed; inset: 0; z-index: 4; pointer-events: none; }
+  .calib-dot {
+    position: absolute;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: rgba(0,0,0,0.35);
+    border: 1px solid rgba(0,0,0,0.55);
+    transform: translate(-50%, -50%);
+    cursor: crosshair;
+    pointer-events: auto;
+    transition: background-color 160ms, transform 160ms;
+  }
+  .calib-dot:hover { transform: translate(-50%, -50%) scale(1.2); }
+  .calib-dot.done { background: rgba(40,160,40,0.6); border-color: rgba(40,160,40,0.9); }
+
+  .click-anywhere {
+    position: fixed; left: 50%; bottom: 16px;
+    transform: translateX(-50%);
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 8px; padding: 6px 12px;
+    font-size: 11px; color: var(--muted);
+    z-index: 15;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">loading MediaPipe + WebGazer…</div>
+
+<!-- WebGazer bundle (loaded eagerly; started on demand) -->
+<script src="vendor/webgazer/www/webgazer.js"></script>
+
+<!-- Camera + rectified patches -->
+<div class="pip">
+  <video id="webcam" autoplay playsinline muted></video>
+  <div class="patches">
+    <div class="lbl">rectified (features)</div>
+    <canvas id="patch-left"  width="40" height="20"></canvas>
+    <canvas id="patch-right" width="40" height="20"></canvas>
+  </div>
+</div>
+
+<!-- Controls -->
+<aside class="controls">
+  <h1>Rectified + pose gaze</h1>
+  <div class="hint">
+    Click the dots (or anywhere) while looking at them. After ~15 samples
+    a dark ring shows our prediction; after WebGazer warms up, a red ring
+    shows its. Goal: compare.
+  </div>
+
+  <h2>Samples</h2>
+  <div class="row"><span class="label">Collected</span><span class="val" id="n-samples">0</span></div>
+  <div class="row">
+    <button id="btn-clear">Clear samples</button>
+    <button id="btn-refit" class="primary">Refit</button>
+  </div>
+
+  <h2>Features</h2>
+  <div class="row">
+    <label><input type="checkbox" id="use-pose" checked /> Include pose (yaw/pitch/roll)</label>
+  </div>
+  <div class="row">
+    <span class="label">Pose weight</span><span class="val" id="pose-scale-val">1.0</span>
+  </div>
+  <input type="range" id="pose-scale" min="0" max="5" step="0.1" value="1.0" />
+  <div class="hint">
+    Multiplier on the normalized pose features. Higher = pose matters more
+    in the regression (compensates for ridge's L2 drowning them).
+  </div>
+
+  <h2>Regression</h2>
+  <div class="row">
+    <span class="label">λ (ridge)</span><span class="val" id="lambda-val">0.50</span>
+  </div>
+  <input type="range" id="lambda" min="-3" max="3" step="0.1" value="-0.3" />
+  <div class="hint">Log-scale: slider value s means λ = 10<sup>s</sup>.</div>
+
+  <h2>Errors (train)</h2>
+  <div class="row">
+    <span class="label"><span class="legend"><span class="dot ours"></span></span>ours</span>
+    <span class="val" id="mse-ours">—</span>
+  </div>
+  <div class="row">
+    <span class="label"><span class="legend"><span class="dot wg"></span></span>webgazer</span>
+    <span class="val" id="mse-wg">—</span>
+  </div>
+  <div class="hint">
+    MSE on the collected samples (RMSE in px on each axis, averaged).
+    Train error only; for a true test we'd need a held-out set.
+  </div>
+
+  <h2>Head pose</h2>
+  <div class="row"><span class="label">yaw</span>  <span class="val" id="yaw">—</span></div>
+  <div class="row"><span class="label">pitch</span><span class="val" id="pitch">—</span></div>
+  <div class="row"><span class="label">roll</span> <span class="val" id="roll">—</span></div>
+
+  <h2>WebGazer</h2>
+  <div class="row"><span class="label">status</span><span class="val" id="wg-status">idle</span></div>
+  <div class="row">
+    <button id="toggle-wg" class="wide">Start WebGazer baseline</button>
+  </div>
+</aside>
+
+<!-- Calibration dots -->
+<div id="calib-grid"></div>
+
+<!-- Gaze markers -->
+<div class="gaze-marker ours" id="marker-ours"></div>
+<div class="gaze-marker wg"   id="marker-wg"></div>
+
+<div class="click-anywhere">Click anywhere to add a calibration sample</div>
+
+<script type="module">
+import {
+  FaceLandmarker,
+  FilesetResolver,
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9";
+
+// ============================================================
+// DOM
+// ============================================================
+const video    = document.getElementById("webcam");
+const loading  = document.getElementById("loading");
+const patchL   = document.getElementById("patch-left");
+const patchR   = document.getElementById("patch-right");
+const pLctx    = patchL.getContext("2d", { willReadFrequently: true });
+const pRctx    = patchR.getContext("2d", { willReadFrequently: true });
+const markerOurs = document.getElementById("marker-ours");
+const markerWG   = document.getElementById("marker-wg");
+const calibGrid  = document.getElementById("calib-grid");
+
+// ============================================================
+// Feature dimensions
+// ============================================================
+const PATCH_W = 40, PATCH_H = 20;         // per-eye feature grid
+const PIXEL_DIMS_PER_EYE = PATCH_W * PATCH_H;  // 800
+const TOTAL_PIXEL_DIMS   = PIXEL_DIMS_PER_EYE * 2; // 1600
+const POSE_DIMS          = 3;
+const D_WITH_POSE        = TOTAL_PIXEL_DIMS + POSE_DIMS + 1; // + bias
+const D_NO_POSE          = TOTAL_PIXEL_DIMS + 1;
+
+// ============================================================
+// Eye landmark indices (MediaPipe face mesh)
+// ============================================================
+const LEFT_IDX  = { outer: 33,  inner: 133, top: 159, bot: 145, pupil: 468 };
+const RIGHT_IDX = { inner: 362, outer: 263, top: 386, bot: 374, pupil: 473 };
+
+// ============================================================
+// State
+// ============================================================
+let faceLandmarker = null;
+let lastTime = -1;
+
+// Current per-frame features (rebuilt every face tick)
+let curFeat = null;         // Float32Array of length D_WITH_POSE or D_NO_POSE
+let curPose = null;         // {yaw, pitch, roll} in radians
+
+// Training samples (rows = samples, each row is a Float32Array of length D)
+const samples = {
+  X: [],        // feature rows
+  ys: [],       // screen_x targets
+  yt: [],       // screen_y targets
+  clicks: [],   // {x, y} for rendering as done-dots
+};
+
+// Fitted weights
+let wx = null, wy = null; // Float32Array(D)
+
+// WebGazer state
+const wg = { started: false, starting: false, lastXY: null };
+
+// UI knobs
+let usePose = true;
+let poseScale = 1.0;
+let lambda = Math.pow(10, -0.3);
+
+// ============================================================
+// Setup
+// ============================================================
+async function setup() {
+  const fileset = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+  );
+  faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      delegate: "GPU",
+    },
+    outputFaceBlendshapes: false,
+    outputFacialTransformationMatrixes: true,
+    runningMode: "VIDEO",
+    numFaces: 1,
+  });
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: 1280, height: 720 }, audio: false,
+  });
+  video.srcObject = stream;
+  await new Promise((r) => (video.onloadedmetadata = r));
+  await video.play();
+
+  makeCalibGrid();
+  loading.remove();
+  requestAnimationFrame(loop);
+}
+
+function makeCalibGrid() {
+  const cols = 4, rows = 3;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const fx = 0.08 + (c / (cols - 1)) * 0.84;
+      const fy = 0.12 + (r / (rows - 1)) * 0.76;
+      const el = document.createElement("div");
+      el.className = "calib-dot";
+      el.style.left = fx * 100 + "%";
+      el.style.top  = fy * 100 + "%";
+      calibGrid.appendChild(el);
+    }
+  }
+}
+
+// ============================================================
+// Main loop
+// ============================================================
+function loop() {
+  const now = performance.now();
+  if (video.readyState >= 2 && video.currentTime !== lastTime) {
+    lastTime = video.currentTime;
+    const res = faceLandmarker.detectForVideo(video, now);
+    computeFeatures(res);
+    predictAndDraw();
+  }
+  requestAnimationFrame(loop);
+}
+
+// ============================================================
+// Feature extraction: rectified eye patches + head pose
+// ============================================================
+function computeFeatures(res) {
+  const lm = res.faceLandmarks && res.faceLandmarks[0];
+  if (!lm) { curFeat = null; return; }
+
+  const W = video.videoWidth, H = video.videoHeight;
+  extractRectifiedPatch(lm, LEFT_IDX,  pLctx, W, H);
+  extractRectifiedPatch(lm, RIGHT_IDX, pRctx, W, H);
+
+  // Grab grayscale pixel features from both patches
+  const feat = new Float32Array(usePose ? D_WITH_POSE : D_NO_POSE);
+  const dataL = pLctx.getImageData(0, 0, PATCH_W, PATCH_H).data;
+  const dataR = pRctx.getImageData(0, 0, PATCH_W, PATCH_H).data;
+  const inv255 = 1 / 255;
+  for (let i = 0, j = 0; i < dataL.length; i += 4, j++) {
+    // Rec.601 luma
+    feat[j] = (dataL[i] * 0.299 + dataL[i + 1] * 0.587 + dataL[i + 2] * 0.114) * inv255;
+  }
+  for (let i = 0, j = PIXEL_DIMS_PER_EYE; i < dataR.length; i += 4, j++) {
+    feat[j] = (dataR[i] * 0.299 + dataR[i + 1] * 0.587 + dataR[i + 2] * 0.114) * inv255;
+  }
+
+  // Head pose
+  const m = res.facialTransformationMatrixes && res.facialTransformationMatrixes[0];
+  if (m) curPose = matrixToEuler(m);
+  else   curPose = { yaw: 0, pitch: 0, roll: 0 };
+
+  if (curPose) {
+    document.getElementById("yaw")  .textContent = (curPose.yaw  * 180 / Math.PI).toFixed(1) + "°";
+    document.getElementById("pitch").textContent = (curPose.pitch * 180 / Math.PI).toFixed(1) + "°";
+    document.getElementById("roll") .textContent = (curPose.roll * 180 / Math.PI).toFixed(1) + "°";
+  }
+
+  // Append pose features (normalized + scaled) and bias
+  if (usePose) {
+    const PI_Q = Math.PI / 4; // ±45° maps to ±1
+    feat[TOTAL_PIXEL_DIMS]     = (curPose.yaw   / PI_Q) * poseScale;
+    feat[TOTAL_PIXEL_DIMS + 1] = (curPose.pitch / PI_Q) * poseScale;
+    feat[TOTAL_PIXEL_DIMS + 2] = (curPose.roll  / PI_Q) * poseScale;
+    feat[TOTAL_PIXEL_DIMS + 3] = 1; // bias
+  } else {
+    feat[TOTAL_PIXEL_DIMS] = 1; // bias
+  }
+
+  curFeat = feat;
+}
+
+function extractRectifiedPatch(lm, idx, ctx, W, H) {
+  const p = (i) => ({ x: lm[i].x * W, y: lm[i].y * H });
+  const cornerA = p(idx.outer);
+  const cornerB = p(idx.inner);
+  const [from, to] = cornerA.x < cornerB.x ? [cornerA, cornerB] : [cornerB, cornerA];
+  const midX = (from.x + to.x) / 2;
+  const midY = (from.y + to.y) / 2;
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const eyeLen = Math.hypot(dx, dy);
+  const angle  = Math.atan2(dy, dx);
+  // Canonical layout: corners at ±(PATCH_W/2 - inset) from patch center
+  const inset = 4;
+  const targetLen = PATCH_W - 2 * inset;
+  const scale = targetLen / eyeLen;
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, PATCH_W, PATCH_H);
+  ctx.translate(PATCH_W / 2, PATCH_H / 2);
+  ctx.scale(scale, scale);
+  ctx.rotate(-angle);
+  ctx.translate(-midX, -midY);
+  ctx.drawImage(video, 0, 0);
+  ctx.restore();
+}
+
+function matrixToEuler(mat) {
+  // Column-major 4x4; use row-major access via data[col*4 + row]
+  const m = mat.data;
+  const sy = Math.sqrt(m[0] * m[0] + m[1] * m[1]);
+  const singular = sy < 1e-6;
+  let x, y, z;
+  if (!singular) {
+    x = Math.atan2(m[6], m[10]);
+    y = Math.atan2(-m[2], sy);
+    z = Math.atan2(m[1], m[0]);
+  } else {
+    x = Math.atan2(-m[9], m[5]);
+    y = Math.atan2(-m[2], sy);
+    z = 0;
+  }
+  return { pitch: x, yaw: y, roll: z };
+}
+
+// ============================================================
+// Predict + draw
+// ============================================================
+function predictAndDraw() {
+  if (curFeat && wx && wy) {
+    const px = dot(curFeat, wx);
+    const py = dot(curFeat, wy);
+    markerOurs.style.left = px + "px";
+    markerOurs.style.top  = py + "px";
+    markerOurs.classList.add("visible");
+  } else {
+    markerOurs.classList.remove("visible");
+  }
+  if (wg.started && wg.lastXY) {
+    markerWG.style.left = wg.lastXY.x + "px";
+    markerWG.style.top  = wg.lastXY.y + "px";
+    markerWG.classList.add("visible");
+  } else {
+    markerWG.classList.remove("visible");
+  }
+}
+
+function dot(a, b) {
+  let s = 0;
+  const n = a.length;
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s;
+}
+
+// ============================================================
+// Clicks → samples → refit
+// ============================================================
+document.addEventListener("click", (e) => {
+  // Ignore clicks on UI
+  if (e.target && e.target.closest(".controls, .pip, .click-anywhere, .gaze-marker")) return;
+  if (!curFeat) return;
+
+  const f = new Float32Array(curFeat); // snapshot (curFeat is reused next frame)
+  samples.X.push(f);
+  samples.ys.push(e.clientX);
+  samples.yt.push(e.clientY);
+  samples.clicks.push({ x: e.clientX, y: e.clientY });
+
+  document.getElementById("n-samples").textContent = samples.X.length;
+
+  // Mark the calibration dot as "done" if we hit one
+  if (e.target && e.target.classList.contains("calib-dot")) {
+    e.target.classList.add("done");
+  }
+
+  // Refit if we have enough samples and pipeline supports it
+  if (samples.X.length >= 8) refit();
+}, true);
+
+document.getElementById("btn-clear").addEventListener("click", () => {
+  samples.X.length = 0;
+  samples.ys.length = 0;
+  samples.yt.length = 0;
+  samples.clicks.length = 0;
+  wx = wy = null;
+  document.getElementById("n-samples").textContent = "0";
+  document.getElementById("mse-ours").textContent = "—";
+  document.getElementById("mse-wg").textContent   = "—";
+  document.querySelectorAll(".calib-dot.done").forEach(d => d.classList.remove("done"));
+});
+document.getElementById("btn-refit").addEventListener("click", refit);
+
+document.getElementById("use-pose").addEventListener("change", (e) => {
+  usePose = e.target.checked;
+  // Clear samples since the feature dim changes
+  if (samples.X.length) {
+    if (confirm("Switching pose on/off changes feature size. Clear samples?")) {
+      document.getElementById("btn-clear").click();
+    } else {
+      e.target.checked = !e.target.checked;
+      usePose = e.target.checked;
+    }
+  }
+});
+document.getElementById("pose-scale").addEventListener("input", (e) => {
+  poseScale = parseFloat(e.target.value);
+  document.getElementById("pose-scale-val").textContent = poseScale.toFixed(1);
+  // Poses baked into historical samples are frozen — refit only picks up new scale
+  // once new samples come in. Inform the user by re-normalizing existing pose
+  // values in every stored sample.
+  if (samples.X.length) {
+    for (const f of samples.X) {
+      // We stored normalized pose * scale. To "re-scale" we'd need raw values,
+      // which we don't keep. Simplest: nudge the user.
+    }
+  }
+});
+document.getElementById("lambda").addEventListener("input", (e) => {
+  const s = parseFloat(e.target.value);
+  lambda = Math.pow(10, s);
+  document.getElementById("lambda-val").textContent = lambda.toFixed(lambda < 1 ? 2 : (lambda < 10 ? 1 : 0));
+  if (samples.X.length >= 8) refit();
+});
+
+// ============================================================
+// Ridge regression (dual formulation)
+//   w = X^T (X X^T + λI)^-1 y
+//   — efficient when #samples < #features, which is our case.
+// ============================================================
+function refit() {
+  const n = samples.X.length;
+  if (n < 4) return;
+  const d = samples.X[0].length;
+
+  // K = X X^T   (n × n)
+  const K = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) {
+    const xi = samples.X[i];
+    for (let j = i; j < n; j++) {
+      const xj = samples.X[j];
+      let s = 0;
+      for (let k = 0; k < d; k++) s += xi[k] * xj[k];
+      K[i * n + j] = s;
+      K[j * n + i] = s;
+    }
+  }
+  for (let i = 0; i < n; i++) K[i * n + i] += lambda;
+
+  // Solve K α = y for both targets
+  const yx = Float64Array.from(samples.ys);
+  const yt = Float64Array.from(samples.yt);
+  const Kcopy = new Float64Array(K); // gaussElim mutates its input
+  const ax = gaussSolve(Kcopy, yx, n);
+
+  const Kcopy2 = new Float64Array(K);
+  const ay = gaussSolve(Kcopy2, yt, n);
+
+  if (!ax || !ay) return;
+
+  // w = X^T α   (d,)
+  const wxN = new Float32Array(d);
+  const wyN = new Float32Array(d);
+  for (let i = 0; i < n; i++) {
+    const xi = samples.X[i];
+    const cx = ax[i], cy = ay[i];
+    for (let k = 0; k < d; k++) {
+      wxN[k] += xi[k] * cx;
+      wyN[k] += xi[k] * cy;
+    }
+  }
+  wx = wxN; wy = wyN;
+
+  // Train MSE/RMSE
+  let sx = 0, sy = 0;
+  for (let i = 0; i < n; i++) {
+    const xi = samples.X[i];
+    const px = dot(xi, wx), py = dot(xi, wy);
+    const ex = samples.ys[i] - px, ey = samples.yt[i] - py;
+    sx += ex * ex; sy += ey * ey;
+  }
+  const rmseX = Math.sqrt(sx / n), rmseY = Math.sqrt(sy / n);
+  const rmseAvg = (rmseX + rmseY) / 2;
+  document.getElementById("mse-ours").textContent = rmseAvg.toFixed(0) + " px";
+
+  // Also compute WebGazer MSE on our click history (approx — we don't
+  // have its per-click prediction at the moment of click, so we reuse
+  // the most recent live prediction at each sample's click; to do this
+  // properly we'd snapshot wg.lastXY at click time. Left as a caveat.)
+  if (samples.wgPreds && samples.wgPreds.length === n) {
+    let wx2 = 0, wy2 = 0, cnt = 0;
+    for (let i = 0; i < n; i++) {
+      const p = samples.wgPreds[i];
+      if (!p) continue;
+      const ex = samples.ys[i] - p.x, ey = samples.yt[i] - p.y;
+      wx2 += ex * ex; wy2 += ey * ey; cnt++;
+    }
+    if (cnt) {
+      const r = (Math.sqrt(wx2 / cnt) + Math.sqrt(wy2 / cnt)) / 2;
+      document.getElementById("mse-wg").textContent = r.toFixed(0) + " px";
+    }
+  }
+}
+
+// Solve A x = b with plain Gaussian elimination + partial pivoting.
+// A is n×n Float64 row-major. Mutates A and b. Returns solution (Float64Array) or null.
+function gaussSolve(A, b, n) {
+  const x = new Float64Array(b);
+  for (let i = 0; i < n; i++) {
+    // Find pivot
+    let p = i;
+    let pv = Math.abs(A[i * n + i]);
+    for (let r = i + 1; r < n; r++) {
+      const v = Math.abs(A[r * n + i]);
+      if (v > pv) { pv = v; p = r; }
+    }
+    if (pv < 1e-10) return null;
+    if (p !== i) {
+      for (let c = i; c < n; c++) {
+        const t = A[i * n + c]; A[i * n + c] = A[p * n + c]; A[p * n + c] = t;
+      }
+      const t = x[i]; x[i] = x[p]; x[p] = t;
+    }
+    // Eliminate
+    const piv = A[i * n + i];
+    for (let r = i + 1; r < n; r++) {
+      const f = A[r * n + i] / piv;
+      if (f === 0) continue;
+      for (let c = i; c < n; c++) A[r * n + c] -= f * A[i * n + c];
+      x[r] -= f * x[i];
+    }
+  }
+  // Back-substitute
+  const out = new Float64Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    let s = x[i];
+    for (let c = i + 1; c < n; c++) s -= A[i * n + c] * out[c];
+    out[i] = s / A[i * n + i];
+  }
+  return out;
+}
+
+// ============================================================
+// WebGazer baseline (optional)
+// ============================================================
+samples.wgPreds = []; // aligned with samples.X
+
+function snapshotWGPrediction() {
+  // Push current WG prediction (or null) parallel to each sample.
+  samples.wgPreds.push(wg.lastXY ? { x: wg.lastXY.x, y: wg.lastXY.y } : null);
+}
+// Hook click-append
+const _origClickListenerAdded = true; // keep the click listener in sync
+document.addEventListener("click", (e) => {
+  if (e.target && e.target.closest(".controls, .pip, .click-anywhere, .gaze-marker")) return;
+  if (!curFeat) return;
+  snapshotWGPrediction();
+}, true);
+
+document.getElementById("toggle-wg").addEventListener("click", () => {
+  if (typeof webgazer === "undefined") {
+    document.getElementById("wg-status").textContent = "script not loaded";
+    return;
+  }
+  if (wg.started || wg.starting) return;
+  wg.starting = true;
+  document.getElementById("wg-status").textContent = "starting…";
+  document.getElementById("toggle-wg").disabled = true;
+
+  webgazer.setTracker("TFFacemesh");
+  webgazer.setGazeListener((data) => {
+    if (!data) return;
+    wg.lastXY = { x: data.x, y: data.y };
+  }).begin().then(() => {
+    wg.started = true; wg.starting = false;
+    document.getElementById("wg-status").textContent = "running";
+    try {
+      webgazer.showPredictionPoints(false);
+      webgazer.showVideo(false);
+      webgazer.showFaceOverlay(false);
+      webgazer.showFaceFeedbackBox(false);
+    } catch (e) {}
+    // Click-only calibration to match ours
+    webgazer.removeMouseEventListeners();
+    document.addEventListener("click", (e) => {
+      try { webgazer.recordScreenPosition(e.clientX, e.clientY, "click"); } catch (err) {}
+    }, true);
+  }).catch((e) => {
+    wg.starting = false;
+    document.getElementById("wg-status").textContent = "failed: " + (e?.message || e);
+    document.getElementById("toggle-wg").disabled = false;
+    console.error(e);
+  });
+});
+
+// ============================================================
+// Kick off
+// ============================================================
+setup().catch((err) => {
+  loading.textContent = "setup failed: " + (err && err.message || err);
+  console.error(err);
+});
+</script>
+</body>
+</html>
