@@ -180,7 +180,10 @@
   });
 
   // Start WebGazer
-  // Minimal start — use all defaults. The fancy toggles come after begin().
+  // Use TensorFlow.js face-mesh tracker (TFFaceMesh). The default tracker
+  // would be MediaPipe's FaceMesh which needs local .binarypb + wasm assets
+  // next to webgazer.js that we haven't vendored.
+  webgazer.setTracker("TFFaceMesh");
   webgazer.setGazeListener((data, elapsedTime) => {
     if (!data) return;
     hudX.textContent = data.x.toFixed(0);
