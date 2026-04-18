@@ -4,6 +4,13 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Rectified + pose gaze regression — vs. WebGazer</title>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
 <style>
   :root {
     --bg: #f4f3ef;
@@ -157,6 +164,31 @@
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
   }
+
+  /* Head point-cloud widget, bottom-left */
+  .headviz {
+    position: fixed; left: 16px; bottom: 16px;
+    z-index: 15;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 8px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .headviz canvas {
+    display: block;
+    width: 200px; height: 200px;
+    background: #0d0d0d;
+    border-radius: 8px;
+  }
+  .headviz .hud {
+    display: flex; gap: 14px; justify-content: center;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 10px; color: var(--muted);
+    margin-top: 4px;
+  }
+  .headviz .hud .k { color: var(--text); }
 </style>
 </head>
 <body>
@@ -250,7 +282,18 @@
 
 <div class="click-anywhere">Click anywhere to add a calibration sample</div>
 
+<!-- Head point-cloud mini-view -->
+<div class="headviz">
+  <canvas id="headviz-canvas" width="400" height="400"></canvas>
+  <div class="hud">
+    <span class="k">yaw</span>  <span id="hv-yaw">—</span>
+    <span class="k">pitch</span><span id="hv-pitch">—</span>
+    <span class="k">roll</span> <span id="hv-roll">—</span>
+  </div>
+</div>
+
 <script type="module">
+import * as THREE from "three";
 import {
   FaceLandmarker,
   FilesetResolver,
@@ -319,6 +362,151 @@ let poseScale = 1.0;
 let lambda = Math.pow(10, -0.3);
 
 // ============================================================
+// Head point-cloud mini-view (THREE.js)
+// ============================================================
+const headViz = {
+  renderer: null,
+  scene: null,
+  camera: null,
+  allPoints: null,     // THREE.Points for full face mesh
+  eyePoints: null,     // THREE.Points for highlighted eye contours
+  irisPoints: null,    // THREE.Points for iris / pupils
+  arrow: null,         // forward-direction arrow from head center
+  positions: null,     // Float32Array buffer for face mesh (3 floats per landmark)
+  eyePositions: null,
+  irisPositions: null,
+  nFace: 0,
+  eyeIdxList: null,
+  irisIdxList: null,
+  initialized: false,
+};
+
+function initHeadViz() {
+  if (headViz.initialized) return;
+  const canvas = document.getElementById("headviz-canvas");
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(200, 200, false);
+  renderer.setClearColor(0x0d0d0d, 1);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 10);
+  camera.position.set(0, 0, 1.6);
+  camera.lookAt(0, 0, 0);
+
+  // Full face mesh as small gray points
+  const N_FACE = 478;
+  const posFace = new Float32Array(N_FACE * 3);
+  const geoFace = new THREE.BufferGeometry();
+  geoFace.setAttribute("position", new THREE.BufferAttribute(posFace, 3));
+  const matFace = new THREE.PointsMaterial({
+    color: 0x777777, size: 0.006, sizeAttenuation: true,
+    transparent: true, opacity: 0.85,
+  });
+  const allPoints = new THREE.Points(geoFace, matFace);
+  scene.add(allPoints);
+
+  // Eye contours highlighted
+  const EYE_IDX = [
+    33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246, // left eye
+    362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398, // right eye
+  ];
+  const posEye = new Float32Array(EYE_IDX.length * 3);
+  const geoEye = new THREE.BufferGeometry();
+  geoEye.setAttribute("position", new THREE.BufferAttribute(posEye, 3));
+  const matEye = new THREE.PointsMaterial({
+    color: 0xff4040, size: 0.012, sizeAttenuation: true,
+  });
+  const eyePoints = new THREE.Points(geoEye, matEye);
+  scene.add(eyePoints);
+
+  // Iris / pupil as bright bigger dots
+  const IRIS_IDX = [468, 469, 470, 471, 472, 473, 474, 475, 476, 477];
+  const posIris = new Float32Array(IRIS_IDX.length * 3);
+  const geoIris = new THREE.BufferGeometry();
+  geoIris.setAttribute("position", new THREE.BufferAttribute(posIris, 3));
+  const matIris = new THREE.PointsMaterial({
+    color: 0xff2020, size: 0.022, sizeAttenuation: true,
+  });
+  const irisPoints = new THREE.Points(geoIris, matIris);
+  scene.add(irisPoints);
+
+  // Forward-direction arrow (orange) + world axes (dim reference frame)
+  const arrow = new THREE.ArrowHelper(
+    new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0),
+    0.5, 0xffa040, 0.14, 0.07
+  );
+  scene.add(arrow);
+
+  // Faint reference axes so yaw/pitch/roll are readable
+  const axes = new THREE.AxesHelper(0.35);
+  axes.material.transparent = true;
+  axes.material.opacity = 0.25;
+  scene.add(axes);
+
+  Object.assign(headViz, {
+    renderer, scene, camera,
+    allPoints, eyePoints, irisPoints, arrow,
+    positions: posFace, eyePositions: posEye, irisPositions: posIris,
+    nFace: N_FACE, eyeIdxList: EYE_IDX, irisIdxList: IRIS_IDX,
+    initialized: true,
+  });
+}
+
+// Update the point cloud from the current frame's landmarks + render
+function updateHeadViz(lm, pose) {
+  if (!headViz.initialized) return;
+  if (!lm) { headViz.renderer.render(headViz.scene, headViz.camera); return; }
+
+  // MediaPipe landmark positions are normalized image coords; y goes down.
+  // Convert to a centered 3D frame: x ∈ [-0.5, 0.5], y flipped, z depth.
+  const posF = headViz.positions;
+  for (let i = 0; i < headViz.nFace; i++) {
+    const l = lm[i];
+    if (!l) continue;
+    posF[i * 3 + 0] = (l.x - 0.5);
+    posF[i * 3 + 1] = (0.5 - l.y);
+    posF[i * 3 + 2] = -l.z * 0.8;
+  }
+  headViz.allPoints.geometry.attributes.position.needsUpdate = true;
+
+  const posE = headViz.eyePositions;
+  for (let k = 0; k < headViz.eyeIdxList.length; k++) {
+    const i = headViz.eyeIdxList[k], l = lm[i];
+    if (!l) continue;
+    posE[k * 3 + 0] = (l.x - 0.5);
+    posE[k * 3 + 1] = (0.5 - l.y);
+    posE[k * 3 + 2] = -l.z * 0.8;
+  }
+  headViz.eyePoints.geometry.attributes.position.needsUpdate = true;
+
+  const posI = headViz.irisPositions;
+  for (let k = 0; k < headViz.irisIdxList.length; k++) {
+    const i = headViz.irisIdxList[k], l = lm[i];
+    if (!l) continue;
+    posI[k * 3 + 0] = (l.x - 0.5);
+    posI[k * 3 + 1] = (0.5 - l.y);
+    posI[k * 3 + 2] = -l.z * 0.8;
+  }
+  headViz.irisPoints.geometry.attributes.position.needsUpdate = true;
+
+  // Head-forward arrow: origin at face midpoint, direction from yaw/pitch.
+  if (pose) {
+    const midX = (lm[33].x + lm[263].x) / 2 - 0.5;
+    const midY = 0.5 - (lm[33].y + lm[263].y) / 2;
+    const midZ = -(lm[33].z + lm[263].z) / 2 * 0.8;
+    headViz.arrow.position.set(midX, midY, midZ);
+    const fx = Math.sin(pose.yaw) * Math.cos(pose.pitch);
+    const fy = -Math.sin(pose.pitch);
+    const fz = Math.cos(pose.yaw) * Math.cos(pose.pitch);
+    headViz.arrow.setDirection(new THREE.Vector3(fx, fy, fz).normalize());
+    headViz.arrow.setLength(0.45, 0.12, 0.06);
+  }
+
+  headViz.renderer.render(headViz.scene, headViz.camera);
+}
+
+// ============================================================
 // Setup
 // ============================================================
 async function setup() {
@@ -345,6 +533,7 @@ async function setup() {
   await video.play();
 
   makeCalibGrid();
+  initHeadViz();
   loading.remove();
   requestAnimationFrame(loop);
 }
@@ -374,6 +563,15 @@ function loop() {
     const res = faceLandmarker.detectForVideo(video, now);
     computeFeatures(res);
     predictAndDraw();
+    // Mirror the head-pose readout into the mini-viz HUD, then draw it.
+    if (curPose) {
+      const toDeg = 180 / Math.PI;
+      document.getElementById("hv-yaw")  .textContent = (curPose.yaw   * toDeg).toFixed(0) + "°";
+      document.getElementById("hv-pitch").textContent = (curPose.pitch * toDeg).toFixed(0) + "°";
+      document.getElementById("hv-roll") .textContent = (curPose.roll  * toDeg).toFixed(0) + "°";
+    }
+    const lm = res.faceLandmarks && res.faceLandmarks[0];
+    updateHeadViz(lm, curPose);
   }
   requestAnimationFrame(loop);
 }
