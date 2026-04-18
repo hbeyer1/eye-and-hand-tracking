@@ -1,0 +1,1998 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tracking Avatar v2 — System Mouse Control</title>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+
+<style>
+  :root {
+    --bg: #f4f3ef;
+    --panel: rgba(255,255,255,0.78);
+    --panel-border: rgba(0,0,0,0.08);
+    --hairline: rgba(0,0,0,0.06);
+    --text: #1a1a1a;
+    --text-2: #4a4a48;
+    --muted: #8a8a86;
+    --accent: #1a1a1a;
+    --finger-l: #2a2a2a;
+    --finger-r: #6a6a68;
+    --gaze: #1a1a1a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+    font-feature-settings: "ss01", "cv11";
+    height: 100%;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- Loading & error ---------- */
+  #loading {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg); z-index: 100;
+    flex-direction: column; gap: 16px;
+    font-size: 13px; color: var(--text-2);
+    letter-spacing: 0.01em;
+  }
+  .spinner {
+    width: 24px; height: 24px;
+    border: 1.5px solid var(--hairline);
+    border-top-color: var(--text);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #error {
+    position: fixed; inset: 0;
+    display: none;
+    align-items: center; justify-content: center;
+    background: var(--bg); z-index: 200;
+    flex-direction: column; gap: 12px;
+    padding: 24px; text-align: center; color: var(--text);
+  }
+  #error.show { display: flex; }
+
+  /* ---------- 3D scene fills the screen ---------- */
+  #three-canvas {
+    position: fixed; inset: 0;
+    width: 100vw; height: 100vh;
+    display: block;
+    z-index: 1;
+  }
+
+  /* ---------- Cursors (above 3D, below UI) ---------- */
+  .cursor {
+    position: fixed;
+    pointer-events: none;
+    z-index: 5;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    transition: opacity 0.18s ease, width 0.15s ease, height 0.15s ease;
+    opacity: 0;
+  }
+  .cursor.visible { opacity: 1; }
+  .cursor.finger {
+    background: currentColor;
+  }
+  .cursor.finger-l { color: var(--finger-l); }
+  .cursor.finger-r { color: var(--finger-r); }
+  .cursor.finger.pinching {
+    width: 28px; height: 28px;
+    background: transparent;
+    box-shadow: 0 0 0 1.5px currentColor inset;
+  }
+  .cursor.gaze {
+    width: 56px; height: 56px;
+    border: 1px solid var(--gaze);
+    background: transparent;
+  }
+  .cursor.gaze::after {
+    content: '';
+    position: absolute; inset: 50% 50%;
+    width: 4px; height: 4px;
+    margin: -2px 0 0 -2px;
+    background: var(--gaze);
+    border-radius: 50%;
+  }
+
+  /* ---------- Picture-in-picture webcam ---------- */
+  .pip {
+    position: fixed;
+    top: 24px; left: 24px;
+    width: 220px;
+    border-radius: 16px;
+    overflow: hidden;
+    background: #0e0e0e;
+    z-index: 10;
+    border: 0.5px solid rgba(255, 255, 255, 0.3);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      0 0 0 0.5px rgba(0, 0, 0, 0.04),
+      0 4px 16px rgba(0, 0, 0, 0.07),
+      0 16px 48px rgba(0, 0, 0, 0.06);
+  }
+  .pip .pip-inner {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+  }
+  .pip video, .pip canvas {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    transform: scaleX(-1);
+    display: block;
+  }
+  .pip canvas { pointer-events: none; }
+  .pip-label {
+    position: absolute; top: 8px; left: 10px;
+    color: rgba(255,255,255,0.85);
+    padding: 0;
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    z-index: 2;
+    font-weight: 500;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+  }
+
+  /* ---------- Stats panel — Apple Glass, collapsible ---------- */
+  .stats-panel {
+    position: fixed;
+    top: 24px; right: 24px;
+    width: 280px;
+    background: rgba(255, 255, 255, 0.45);
+    backdrop-filter: blur(40px) saturate(1.8);
+    -webkit-backdrop-filter: blur(40px) saturate(1.8);
+    border-radius: 20px;
+    border: 0.5px solid rgba(255, 255, 255, 0.5);
+    padding: 18px 18px 16px;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.4;
+    z-index: 10;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.7),
+      inset 0 0 0 0.5px rgba(255, 255, 255, 0.25),
+      0 0 0 0.5px rgba(0, 0, 0, 0.03),
+      0 4px 16px rgba(0, 0, 0, 0.06),
+      0 16px 48px rgba(0, 0, 0, 0.06);
+    transition:
+      width 0.42s cubic-bezier(0.4, 0, 0.2, 1),
+      padding 0.42s cubic-bezier(0.4, 0, 0.2, 1),
+      max-height 0.42s cubic-bezier(0.4, 0, 0.2, 1),
+      border-radius 0.42s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .stats-panel::-webkit-scrollbar { width: 4px; }
+  .stats-panel::-webkit-scrollbar-track { background: transparent; }
+  .stats-panel::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: 2px; }
+
+  /* Collapse toggle button */
+  .panel-toggle {
+    position: absolute;
+    top: 12px; right: 12px;
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    border: 0.5px solid rgba(0, 0, 0, 0.06);
+    background: rgba(255, 255, 255, 0.5);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.7),
+      0 1px 2px rgba(0, 0, 0, 0.06);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    color: var(--text-2);
+    padding: 0;
+    z-index: 3;
+    transition: background 0.15s ease;
+  }
+  .panel-toggle:hover { background: rgba(255, 255, 255, 0.8); }
+  .panel-toggle svg {
+    transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  /* Panel content (everything except the toggle) */
+  .panel-content {
+    transition: opacity 0.18s ease;
+  }
+
+  /* Collapsed state */
+  .stats-panel.collapsed {
+    width: 50px;
+    padding: 12px;
+    max-height: 50px;
+    overflow: hidden;
+    cursor: pointer;
+    border-radius: 25px;
+  }
+  .stats-panel.collapsed .panel-content {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .stats-panel.collapsed .panel-toggle {
+    top: 12px; right: 12px;
+  }
+  .stats-panel.collapsed .panel-toggle svg {
+    transform: rotate(180deg);
+  }
+  .stats-panel h1 {
+    font-size: 10px;
+    margin: 0 0 14px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-weight: 500;
+  }
+  .stats-panel h2 {
+    font-size: 9px;
+    margin: 18px 0 8px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-weight: 500;
+  }
+  .row {
+    display: flex; justify-content: space-between;
+    padding: 3px 0;
+    align-items: center;
+    gap: 6px;
+  }
+  .row .label { color: var(--text-2); font-size: 12px; }
+  .row .value {
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .bar {
+    flex: 1;
+    height: 2px;
+    background: var(--hairline);
+    border-radius: 1px;
+    overflow: hidden;
+    position: relative;
+  }
+  .bar.bipolar > div {
+    position: absolute;
+    height: 100%;
+    background: var(--text);
+  }
+  .badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: transparent;
+    border: 1px solid var(--hairline);
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .badge.active { background: var(--text); color: #fff; border-color: var(--text); }
+  .fps-big {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--muted);
+    text-align: left;
+    padding: 0 0 8px;
+    margin-bottom: 0;
+    font-variant-numeric: tabular-nums;
+    border-bottom: 1px solid var(--hairline);
+    letter-spacing: 0.04em;
+  }
+  .controls {
+    margin-top: 14px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  button {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--hairline);
+    padding: 7px 11px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11.5px;
+    letter-spacing: 0.01em;
+    transition: background 0.12s ease, border-color 0.12s ease;
+    text-align: left;
+  }
+  button:hover {
+    background: rgba(0,0,0,0.03);
+    border-color: rgba(0,0,0,0.14);
+  }
+  button.primary {
+    background: var(--text);
+    color: #fff;
+    border-color: var(--text);
+  }
+  button.primary:hover { background: #000; }
+  .hint {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 8px;
+    line-height: 1.5;
+  }
+  input[type=range] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 2px;
+    background: var(--hairline);
+    border-radius: 1px;
+    outline: none;
+    margin: 4px 0;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px; height: 12px;
+    background: var(--text);
+    border-radius: 50%;
+    cursor: pointer;
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 12px; height: 12px;
+    background: var(--text);
+    border-radius: 50%;
+    cursor: pointer;
+    border: none;
+  }
+  input[type=checkbox] {
+    accent-color: var(--text);
+  }
+
+  /* ---------- Game targets overlay (full screen) ---------- */
+  #target-game {
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 4;
+  }
+  .target {
+    position: absolute;
+    width: 56px; height: 56px;
+    border: 1px solid var(--text);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  .target::after {
+    content: '';
+    position: absolute;
+    inset: 22px;
+    background: var(--text);
+    border-radius: 50%;
+  }
+  @keyframes pulse {
+    0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.8; }
+    50%      { transform: translate(-50%, -50%) scale(1.06); opacity: 1; }
+  }
+
+  /* ---------- View mode toggle ---------- */
+  .view-toggle {
+    display: flex;
+    background: var(--hairline);
+    border-radius: 5px;
+    padding: 2px;
+    margin-bottom: 14px;
+    gap: 0;
+  }
+  .vt-btn {
+    flex: 1;
+    background: transparent;
+    border: none;
+    padding: 5px 8px;
+    color: var(--muted);
+    font-size: 10.5px;
+    font-family: inherit;
+    cursor: pointer;
+    border-radius: 4px;
+    letter-spacing: 0.02em;
+    transition: background 0.12s ease, color 0.12s ease;
+    text-align: center;
+  }
+  .vt-btn:hover { color: var(--text-2); }
+  .vt-btn.active {
+    background: #fff;
+    color: var(--text);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  }
+
+  /* Camera mode: webcam fullscreen with overlays, hide 3D & cursors */
+  body.mode-camera #three-canvas { display: none; }
+  body.mode-camera .cursor { display: none !important; }
+  body.mode-camera #target-game { display: none; }
+  body.mode-camera .pip {
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(100vw, calc(100vh * 16 / 9));
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+    z-index: 1;
+  }
+  body.mode-camera .pip-label { display: none; }
+
+  /* Body bg in camera mode goes black so video letterbox blends */
+  body.mode-camera { background: #000; }
+
+  /* ---------- Calibrate button hint ---------- */
+  .calib-hint {
+    position: fixed;
+    bottom: 24px; left: 50%;
+    transform: translateX(-50%);
+    background: rgba(255, 255, 255, 0.5);
+    backdrop-filter: blur(30px) saturate(1.7);
+    -webkit-backdrop-filter: blur(30px) saturate(1.7);
+    border: 0.5px solid rgba(255, 255, 255, 0.5);
+    color: var(--text-2);
+    padding: 9px 16px;
+    border-radius: 100px;
+    font-size: 11px;
+    z-index: 20;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.7),
+      0 4px 16px rgba(0, 0, 0, 0.06),
+      0 16px 40px rgba(0, 0, 0, 0.04);
+  }
+
+  /* ---------- Calibration overlay ---------- */
+  .calib-overlay {
+    position: fixed; inset: 0;
+    background: rgba(248,247,243,0.96);
+    backdrop-filter: blur(8px);
+    z-index: 50;
+    display: none;
+  }
+  .calib-overlay.active { display: block; }
+  .calib-target {
+    position: absolute;
+    width: 14px; height: 14px;
+    background: var(--text);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    transition: left 0.45s cubic-bezier(0.4, 0, 0.2, 1),
+                top  0.45s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .calib-target::after {
+    content: '';
+    position: absolute;
+    inset: 5px;
+    background: #fff;
+    border-radius: 50%;
+  }
+  .calib-ring {
+    position: absolute;
+    width: 56px; height: 56px;
+    border: 1px solid var(--text);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+  .calib-instruction {
+    position: absolute;
+    top: 40px; left: 50%; transform: translateX(-50%);
+    color: var(--text);
+    font-size: 13px;
+    padding: 0;
+    text-align: center;
+    font-family: inherit;
+    max-width: 80%;
+    line-height: 1.55;
+    font-weight: 400;
+  }
+  .calib-instruction strong { color: var(--text); font-weight: 600; }
+  .calib-progress {
+    position: absolute;
+    bottom: 40px; left: 50%; transform: translateX(-50%);
+    color: var(--muted);
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.08em;
+  }
+  .calib-cancel {
+    position: absolute;
+    bottom: 32px; right: 32px;
+    z-index: 51;
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <div id="loading-text">Loading MediaPipe models...</div>
+</div>
+
+<div id="error">
+  <h2 style="color: #b91c1c;">Camera error</h2>
+  <p id="error-text"></p>
+  <p style="font-size:12px;color:#666;">If you opened this file directly, you need to serve it over HTTP.<br/>
+  Run <code>python3 -m http.server 8765</code> in this folder, then open
+  <code>http://localhost:8765</code></p>
+</div>
+
+<!-- 3D Tesla-style scene -->
+<canvas id="three-canvas"></canvas>
+
+<!-- Cursors -->
+<div class="cursor finger finger-l" id="cursor-l"></div>
+<div class="cursor finger finger-r" id="cursor-r"></div>
+<div class="cursor gaze" id="cursor-gaze"></div>
+
+<!-- Game targets -->
+<div id="target-game"></div>
+
+<!-- Picture-in-picture webcam -->
+<div class="pip">
+  <div class="pip-label">camera</div>
+  <div class="pip-inner">
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+</div>
+
+<!-- Stats sidebar -->
+<aside class="stats-panel" id="stats-panel">
+  <button class="panel-toggle" id="panel-toggle" aria-label="Toggle panel">
+    <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M10.5 4l-5 4 5 4" stroke="currentColor" stroke-width="1.6"
+            fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </button>
+  <div class="panel-content">
+  <h1>Tracking</h1>
+  <div class="view-toggle">
+    <button id="mode-avatar" class="vt-btn active">Avatar</button>
+    <button id="mode-camera" class="vt-btn">Camera</button>
+  </div>
+  <div class="fps-big" id="fps">— fps</div>
+
+  <h2>Hands</h2>
+  <div class="row"><span class="label">Detected</span><span class="value" id="hand-count">0</span></div>
+  <div id="hand-details"></div>
+
+  <h2>Head pose</h2>
+  <div class="row"><span class="label">Detected</span><span class="value" id="face-detected">no</span></div>
+  <div class="row"><span class="label">Yaw</span><span class="value" id="head-yaw">—</span></div>
+  <div class="row"><span class="label">Pitch</span><span class="value" id="head-pitch">—</span></div>
+  <div class="row"><span class="label">Roll</span><span class="value" id="head-roll">—</span></div>
+
+  <h2>Gaze (iris)</h2>
+  <div class="row">
+    <span class="label" style="min-width:42px;">Horiz</span>
+    <div class="bar bipolar"><div id="gaze-h" style="width:0;"></div></div>
+    <span class="value" id="gaze-h-val" style="min-width:40px;text-align:right;">—</span>
+  </div>
+  <div class="row">
+    <span class="label" style="min-width:42px;">Vert</span>
+    <div class="bar bipolar"><div id="gaze-v" style="width:0;"></div></div>
+    <span class="value" id="gaze-v-val" style="min-width:40px;text-align:right;">—</span>
+  </div>
+  <div class="row"><span class="label">Blink L</span><span class="value" id="blink-l">—</span></div>
+  <div class="row"><span class="label">Blink R</span><span class="value" id="blink-r">—</span></div>
+
+  <div class="controls">
+    <button id="toggle-mesh">Toggle face mesh (PiP)</button>
+    <button id="toggle-gaze">Toggle gaze cursor</button>
+    <h2>Model</h2>
+    <div class="row">
+      <span class="label">Regression</span>
+      <select id="model-mode" style="font-family:inherit;font-size:11px;border:1px solid var(--hairline);border-radius:4px;padding:3px 6px;background:transparent;color:var(--text);">
+        <option value="linear">Linear (11p)</option>
+        <option value="quadratic">Quadratic (28p)</option>
+      </select>
+    </div>
+    <div class="hint">
+      Uses both blendshape + geometric iris ratio as inputs. Quadratic adds curvature terms (needs 40+ samples).
+    </div>
+    <h2>Calibration</h2>
+    <button id="calibrate-gaze" class="primary">Calibrate gaze (9-point)</button>
+    <button id="recenter-gaze">Quick recenter (look at center)</button>
+    <button id="reset-calib">Reset calibration</button>
+    <div class="row" style="margin-top:4px;">
+      <span class="label">Sens X (uncalib)</span>
+      <span class="value" id="sens-x-val">2.5</span>
+    </div>
+    <input id="sens-x-slider" type="range" min="0.5" max="12" step="0.1" value="2.5"
+           style="width:100%;accent-color:var(--accent);" />
+    <div class="row" style="margin-top:4px;">
+      <span class="label">Sens Y (uncalib)</span>
+      <span class="value" id="sens-y-val">2.5</span>
+    </div>
+    <input id="sens-y-slider" type="range" min="0.5" max="12" step="0.1" value="2.5"
+           style="width:100%;accent-color:var(--accent);" />
+    <div class="row" style="margin-top:4px;">
+      <span class="label">Calibration</span>
+      <span class="value" id="calib-status">none</span>
+    </div>
+    <div class="row" style="margin-top:4px;">
+      <span class="label">
+        <input type="checkbox" id="implicit-enabled" checked
+               style="vertical-align:middle;margin-right:4px;accent-color:var(--accent);" />
+        Learn from clicks
+      </span>
+      <span class="value" id="implicit-count">0</span>
+    </div>
+    <button id="clear-implicit">Clear click history</button>
+    <div class="hint">
+      Every time you click anywhere outside the panels, the system assumes you were
+      looking there and adds a calibration sample. Persists across sessions.
+    </div>
+    <button id="toggle-game" class="primary">Start pinch-to-pop game</button>
+    <div class="hint">
+      Targets appear on screen. Move your finger so the green/blue cursor lands on a target, then pinch thumb+index to pop it.
+    </div>
+
+    <h2>System mouse</h2>
+    <div class="row">
+      <span class="label">Bridge</span>
+      <span class="value" id="mc-status">disconnected</span>
+    </div>
+    <button id="mc-connect" class="primary">Connect to bridge</button>
+    <div class="row" style="margin-top:6px;">
+      <span class="label">Control</span>
+      <span class="value">
+        <input type="checkbox" id="mc-enabled"
+               style="vertical-align:middle;accent-color:var(--accent);" />
+      </span>
+    </div>
+    <div class="row" style="margin-top:4px;">
+      <span class="label">Source</span>
+      <select id="mc-source" style="font-family:inherit;font-size:11px;border:1px solid var(--hairline);border-radius:4px;padding:3px 6px;background:transparent;color:var(--text);">
+        <option value="gaze">Gaze (eyes)</option>
+        <option value="right" selected>Right hand (index finger)</option>
+        <option value="left">Left hand (index finger)</option>
+      </select>
+    </div>
+    <div class="row" style="margin-top:4px;">
+      <span class="label">Pinch → click</span>
+      <span class="value">
+        <input type="checkbox" id="mc-pinch-click" checked
+               style="vertical-align:middle;accent-color:var(--accent);" />
+      </span>
+    </div>
+    <div class="row" style="margin-top:4px;">
+      <span class="label">Displays</span>
+      <span class="value" id="mc-displays">—</span>
+    </div>
+    <div class="hint">
+      Run <code>python3 server.py</code> in this folder, then click Connect.
+      The browser window maps to the full virtual desktop, so looking/pointing
+      at the top-left of this window moves the OS cursor to the top-left of
+      your combined screens.
+    </div>
+  </div>
+
+  <h2>Game</h2>
+  <div class="row"><span class="label">Score</span><span class="value" id="score">0</span></div>
+  <div class="row"><span class="label">Avg time</span><span class="value" id="avg-time">—</span></div>
+  </div><!-- /.panel-content -->
+</aside>
+
+<div class="calib-hint">The model learns from where you click — keep using the page normally</div>
+
+<!-- Calibration overlay -->
+<div class="calib-overlay" id="calib-overlay">
+  <div class="calib-instruction" id="calib-instruction">
+    Look at the dot. <strong>Slightly tilt your head</strong> while keeping your eyes locked on it.
+  </div>
+  <div class="calib-target" id="calib-target"></div>
+  <div class="calib-ring" id="calib-ring"></div>
+  <div class="calib-progress" id="calib-progress">0 / 9</div>
+  <button class="calib-cancel" id="calib-cancel">Cancel</button>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import {
+  HandLandmarker,
+  FaceLandmarker,
+  FilesetResolver,
+  DrawingUtils,
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9";
+
+// ---------- DOM ----------
+const video = document.getElementById("webcam");
+const overlay = document.getElementById("overlay");
+const overlayCtx = overlay.getContext("2d");
+const loadingEl = document.getElementById("loading");
+const loadingText = document.getElementById("loading-text");
+const errorEl = document.getElementById("error");
+const errorText = document.getElementById("error-text");
+const cursorL = document.getElementById("cursor-l");
+const cursorR = document.getElementById("cursor-r");
+const cursorGaze = document.getElementById("cursor-gaze");
+const targetGameEl = document.getElementById("target-game");
+
+let handLandmarker, faceLandmarker, drawingUtils;
+let showMesh = true;
+let showGaze = true;
+let lastTime = -1;
+
+// ---------- System mouse bridge (v2) ----------
+// Sends normalized coords to a local Python server that drives the macOS
+// cursor via Quartz. The server maps [0,1] coords into the full virtual
+// desktop rect (union of all monitors), so multi-screen "just works".
+const mouseCtl = {
+  ws: null,
+  connected: false,
+  enabled: false,
+  source: "right",       // "gaze" | "right" | "left"
+  pinchToClick: true,
+  lastSentAt: 0,
+  minSendInterval: 1000 / 90, // cap at ~90 Hz
+  pinchState: { L: false, R: false },
+};
+
+function mcSetStatus(text) {
+  const el = document.getElementById("mc-status");
+  if (el) el.textContent = text;
+}
+
+function mcConnect() {
+  if (mouseCtl.ws && mouseCtl.ws.readyState === WebSocket.OPEN) return;
+  mcSetStatus("connecting…");
+  let ws;
+  try {
+    ws = new WebSocket("ws://127.0.0.1:8766");
+  } catch (e) {
+    mcSetStatus("error: " + e.message);
+    return;
+  }
+  mouseCtl.ws = ws;
+  ws.addEventListener("open", () => {
+    mouseCtl.connected = true;
+    mcSetStatus("connected");
+    ws.send(JSON.stringify({ type: "hello" }));
+  });
+  ws.addEventListener("message", (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "hello") {
+        const d = msg.displays || [];
+        const b = msg.bounds || {};
+        const summary = `${d.length} display${d.length === 1 ? "" : "s"} — ${Math.round(b.w)}×${Math.round(b.h)}`;
+        document.getElementById("mc-displays").textContent = summary;
+      }
+    } catch (e) {}
+  });
+  ws.addEventListener("close", () => {
+    mouseCtl.connected = false;
+    mouseCtl.enabled = false;
+    document.getElementById("mc-enabled").checked = false;
+    mcSetStatus("disconnected");
+  });
+  ws.addEventListener("error", () => {
+    mcSetStatus("error (is server.py running?)");
+  });
+}
+
+function mcSend(obj) {
+  const ws = mouseCtl.ws;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify(obj));
+}
+
+function mcMoveNormalized(nx, ny) {
+  if (!mouseCtl.enabled || !mouseCtl.connected) return;
+  const now = performance.now();
+  if (now - mouseCtl.lastSentAt < mouseCtl.minSendInterval) return;
+  mouseCtl.lastSentAt = now;
+  if (!isFinite(nx) || !isFinite(ny)) return;
+  mcSend({ type: "move", nx, ny });
+}
+
+// Edge-triggered pinch → mouse button. Keeping this edge-triggered lets you
+// drag (pinch + move) as well as single-click.
+function mcHandlePinch(which, isPinching) {
+  if (!mouseCtl.enabled || !mouseCtl.connected || !mouseCtl.pinchToClick) return;
+  // Only fire for the hand currently acting as the mouse source.
+  if (mouseCtl.source === "right" && which !== "R") return;
+  if (mouseCtl.source === "left"  && which !== "L") return;
+  if (mouseCtl.source === "gaze") return; // gaze source has no pinch trigger
+  const prev = mouseCtl.pinchState[which];
+  if (isPinching && !prev) mcSend({ type: "down" });
+  if (!isPinching && prev) mcSend({ type: "up" });
+  mouseCtl.pinchState[which] = isPinching;
+}
+
+// ---------- THREE.js scene ----------
+const threeCanvas = document.getElementById("three-canvas");
+const renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true, alpha: false });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf4f3ef);
+scene.fog = new THREE.FogExp2(0xf4f3ef, 1.4);
+
+const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.01, 100);
+camera.position.set(0, 0.0, 1.0);
+camera.lookAt(0, 0, 0);
+
+// No traditional lights needed — point clouds use unlit material.
+
+// ---------- Point cloud helpers ----------
+function makePointsBuffer(count) {
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+  return geom;
+}
+function makePointsMaterial(size, opacity = 0.95, color = 0x1a1a1a) {
+  return new THREE.PointsMaterial({
+    color,
+    size,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity,
+    blending: THREE.NormalBlending,
+    depthWrite: false,
+    fog: true,
+  });
+}
+
+// ----- Build randomly jittered sample defs (organic stippling, no mesh lines) -----
+// Each def: { type, ...refs, ox, oy, oz }
+//   type 'point' → at landmarks[idx] + offset
+//   type 'edge'  → at lerp(landmarks[a], landmarks[b], t) + offset
+function rand(r) { return (Math.random() - 0.5) * 2 * r; }
+
+// MediaPipe iris landmark layout:
+//   468 = left pupil center,  469-472 = left iris ring (around pupil)
+//   473 = right pupil center, 474-477 = right iris ring
+const IRIS_RING_LANDMARKS  = new Set([469, 470, 471, 472, 474, 475, 476, 477]);
+const IRIS_PUPIL_LANDMARKS = new Set([468, 473]);
+const ALL_IRIS_LANDMARKS   = new Set([...IRIS_RING_LANDMARKS, ...IRIS_PUPIL_LANDMARKS]);
+
+function buildFaceSampleDefs() {
+  const defs = [];
+  const FACE_BASE_COUNT = 478;
+
+  // Contour edges (eye outline kept in face cloud as charcoal — only iris is colored)
+  const contourEdgeSets = [
+    FaceLandmarker.FACE_LANDMARKS_FACE_OVAL,
+    FaceLandmarker.FACE_LANDMARKS_LEFT_EYE,
+    FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE,
+    FaceLandmarker.FACE_LANDMARKS_LEFT_EYEBROW,
+    FaceLandmarker.FACE_LANDMARKS_RIGHT_EYEBROW,
+    FaceLandmarker.FACE_LANDMARKS_LIPS,
+  ];
+  const contourLM = new Set();
+  for (const set of contourEdgeSets) {
+    for (const e of set) { contourLM.add(e.start); contourLM.add(e.end); }
+  }
+
+  for (let i = 0; i < FACE_BASE_COUNT; i++) {
+    if (ALL_IRIS_LANDMARKS.has(i)) continue; // iris/pupil go to colored clouds
+    const isContour = contourLM.has(i);
+    const N  = isContour ? 350 : 60;
+    const r0 = isContour ? 0.010 : 0.007;
+    for (let n = 0; n < N; n++) {
+      defs.push({ type: 'point', idx: i, ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
+    }
+  }
+
+  for (const e of FaceLandmarker.FACE_LANDMARKS_TESSELATION) {
+    if (ALL_IRIS_LANDMARKS.has(e.start) || ALL_IRIS_LANDMARKS.has(e.end)) continue;
+    const N = 55;
+    const r0 = 0.005;
+    for (let n = 0; n < N; n++) {
+      defs.push({ type: 'edge', a: e.start, b: e.end, t: Math.random(),
+                  ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
+    }
+  }
+
+  for (const set of contourEdgeSets) {
+    for (const e of set) {
+      const N = 250;
+      const r0 = 0.0025;
+      for (let n = 0; n < N; n++) {
+        defs.push({ type: 'edge', a: e.start, b: e.end, t: Math.random(),
+                    ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.5) });
+      }
+    }
+  }
+
+  return defs;
+}
+
+// Iris ring (annulus, deep blue). Soft inner/outer boundaries + image-space jitter
+// so the dots blend into the surrounding charcoal stippling.
+function buildIrisRingSampleDefs() {
+  const defs = [];
+  const N_PER_EYE = 1800;
+  const INNER = 0.40;
+  const OUTER = 1.10;
+  for (const side of ["left", "right"]) {
+    for (let n = 0; n < N_PER_EYE; n++) {
+      const u = Math.random();
+      // Uniform-area in annulus + small radial noise for soft edges
+      let rNorm = Math.sqrt(INNER*INNER + u * (OUTER*OUTER - INNER*INNER));
+      rNorm += (Math.random() - 0.5) * 0.18;
+      const angle = Math.random() * Math.PI * 2;
+      defs.push({
+        side, angle, rNorm,
+        ox: rand(0.0028), oy: rand(0.0028), oz: rand(0.001),
+      });
+    }
+  }
+  return defs;
+}
+
+// Pupil (disc, light blue). Same scatter treatment.
+function buildPupilSampleDefs() {
+  const defs = [];
+  const N_PER_EYE = 700;
+  const PUPIL_FRAC = 0.42;
+  for (const side of ["left", "right"]) {
+    for (let n = 0; n < N_PER_EYE; n++) {
+      const u = Math.random();
+      let rNorm = Math.sqrt(u) * PUPIL_FRAC;
+      rNorm += (Math.random() - 0.5) * 0.10;
+      if (rNorm < 0) rNorm = -rNorm; // keep within disc
+      const angle = Math.random() * Math.PI * 2;
+      defs.push({
+        side, angle, rNorm,
+        ox: rand(0.0018), oy: rand(0.0018), oz: rand(0.001),
+      });
+    }
+  }
+  return defs;
+}
+
+
+function buildHandSampleDefs() {
+  const defs = [];
+  const FINGERTIPS = new Set([4, 8, 12, 16, 20]);
+  const KNUCKLES   = new Set([2, 3, 5, 6, 9, 10, 13, 14, 17, 18]);
+
+  // Per-landmark cluster (heavy oversample on tips and knuckles)
+  for (let i = 0; i < 21; i++) {
+    const isTip = FINGERTIPS.has(i);
+    const isKnuckle = KNUCKLES.has(i);
+    const N  = isTip ? 90 : (isKnuckle ? 60 : 35);
+    const r0 = isTip ? 0.014 : 0.012;
+    for (let n = 0; n < N; n++) {
+      defs.push({ type: 'point', idx: i, ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.4) });
+    }
+  }
+
+  // Per-bone samples with jitter (fills the hand silhouette)
+  for (const c of HandLandmarker.HAND_CONNECTIONS) {
+    const N = 60;
+    const r0 = 0.010;
+    for (let n = 0; n < N; n++) {
+      defs.push({ type: 'edge', a: c.start, b: c.end, t: Math.random(),
+                  ox: rand(r0), oy: rand(r0), oz: rand(r0 * 0.4) });
+    }
+  }
+  return defs;
+}
+
+const FACE_SAMPLE_DEFS      = buildFaceSampleDefs();
+const HAND_SAMPLE_DEFS      = buildHandSampleDefs();
+const IRIS_RING_SAMPLE_DEFS = buildIrisRingSampleDefs();
+const PUPIL_SAMPLE_DEFS     = buildPupilSampleDefs();
+
+// Main face (charcoal)
+const facePoints = new THREE.Points(
+  makePointsBuffer(FACE_SAMPLE_DEFS.length),
+  makePointsMaterial(0.0022, 0.08, 0x1a1a1a)
+);
+facePoints.frustumCulled = false;
+facePoints.visible = false;
+scene.add(facePoints);
+
+// Iris ring (deep blue)
+const irisRingPoints = new THREE.Points(
+  makePointsBuffer(IRIS_RING_SAMPLE_DEFS.length),
+  makePointsMaterial(0.0028, 0.32, 0x1d4ed8)
+);
+irisRingPoints.frustumCulled = false;
+irisRingPoints.visible = false;
+scene.add(irisRingPoints);
+
+// Pupil center (amber-yellow, subtle)
+const pupilPoints = new THREE.Points(
+  makePointsBuffer(PUPIL_SAMPLE_DEFS.length),
+  makePointsMaterial(0.0030, 0.55, 0xeab308)
+);
+pupilPoints.frustumCulled = false;
+pupilPoints.visible = false;
+scene.add(pupilPoints);
+
+
+function newHandPoints() {
+  const p = new THREE.Points(
+    makePointsBuffer(HAND_SAMPLE_DEFS.length),
+    makePointsMaterial(0.0035, 0.18)
+  );
+  p.frustumCulled = false;
+  p.visible = false;
+  return p;
+}
+const handLeftPoints  = newHandPoints();
+const handRightPoints = newHandPoints();
+scene.add(handLeftPoints);
+scene.add(handRightPoints);
+
+// "Torso" hint: vertical fade of dots beneath the face that drift slowly. Gives a sense of
+// upper body presence without real body tracking — fades into the void naturally.
+const TORSO_COUNT = 3500;
+const torsoGeom = makePointsBuffer(TORSO_COUNT);
+{
+  const arr = torsoGeom.attributes.position.array;
+  for (let i = 0; i < TORSO_COUNT; i++) {
+    // Sample within a downward-flaring shape (shoulders → fade into floor)
+    const t = Math.random();         // 0 = top (near neck), 1 = bottom (fades out)
+    const yShape = -0.1 - t * 0.9;   // y goes from -0.1 down to -1.0
+    const widen = 0.18 + t * 0.45;   // shoulders widen as you go down
+    const x = (Math.random() - 0.5) * 2 * widen;
+    const z = (Math.random() - 0.5) * 0.4 - 0.05; // slight depth spread, slightly behind face
+    arr[i*3+0] = x;
+    arr[i*3+1] = yShape;
+    arr[i*3+2] = z;
+  }
+}
+const torsoPoints = new THREE.Points(torsoGeom, makePointsMaterial(0.0045, 0.10));
+torsoPoints.frustumCulled = false;
+scene.add(torsoPoints);
+
+// Background ambient particles for atmosphere — drift slowly
+const BG_COUNT = 2500;
+const bgGeom = makePointsBuffer(BG_COUNT);
+{
+  const arr = bgGeom.attributes.position.array;
+  for (let i = 0; i < BG_COUNT; i++) {
+    arr[i*3+0] = (Math.random() - 0.5) * 3.5;
+    arr[i*3+1] = (Math.random() - 0.5) * 2.5;
+    arr[i*3+2] = -0.4 - Math.random() * 1.6;
+  }
+}
+const bgPoints = new THREE.Points(bgGeom, makePointsMaterial(0.0028, 0.08));
+bgPoints.frustumCulled = false;
+scene.add(bgPoints);
+
+// Compatibility shims so the rest of the code (which still references these) doesn't break.
+// The point cloud doesn't need them, but the update loop sets their properties.
+const headGroup = new THREE.Group(); scene.add(headGroup);
+const leftIris  = new THREE.Object3D(); headGroup.add(leftIris);
+const rightIris = new THREE.Object3D(); headGroup.add(rightIris);
+const gazeRay = new THREE.Object3D(); headGroup.add(gazeRay);
+const ARM_GROUPS = {
+  left:  { userData: { fist: { visible: true } } },
+  right: { userData: { fist: { visible: true } } },
+};
+const handLeft  = { group: { visible: false }, joints: [], bones: [] };
+const handRight = { group: { visible: false }, joints: [], bones: [] };
+
+// ---- Resize ----
+window.addEventListener("resize", () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+// ---------- Setup MediaPipe ----------
+async function setup() {
+  try {
+    loadingText.textContent = "Loading MediaPipe runtime...";
+    const fileset = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+    );
+
+    loadingText.textContent = "Loading hand model...";
+    handLandmarker = await HandLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+        delegate: "GPU",
+      },
+      runningMode: "VIDEO",
+      numHands: 2,
+    });
+
+    loadingText.textContent = "Loading face model...";
+    faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+        delegate: "GPU",
+      },
+      outputFaceBlendshapes: true,
+      outputFacialTransformationMatrixes: true,
+      runningMode: "VIDEO",
+      numFaces: 1,
+    });
+
+    loadingText.textContent = "Requesting camera...";
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720, facingMode: "user" },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await new Promise((res) => (video.onloadedmetadata = res));
+    await video.play();
+
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+    drawingUtils = new DrawingUtils(overlayCtx);
+
+    loadingEl.style.display = "none";
+    requestAnimationFrame(loop);
+  } catch (err) {
+    console.error(err);
+    loadingEl.style.display = "none";
+    errorEl.classList.add("show");
+    errorText.textContent = err.message || String(err);
+  }
+}
+
+// ---------- Helpers ----------
+function distance(a, b) {
+  const dx = a.x - b.x, dy = a.y - b.y, dz = (a.z || 0) - (b.z || 0);
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function matrixToEuler(m) {
+  const d = m.data;
+  const r10 = d[1];
+  const r11 = d[5];
+  const r12 = d[9];
+  const r02 = d[8];
+  const r22 = d[10];
+  const r00 = d[0];
+  const r20 = d[2];
+  const pitch = Math.asin(-Math.max(-1, Math.min(1, r12)));
+  let yaw, roll;
+  if (Math.abs(r12) < 0.9999) {
+    yaw = Math.atan2(r02, r22);
+    roll = Math.atan2(r10, r11);
+  } else {
+    yaw = Math.atan2(-r20, r00);
+    roll = 0;
+  }
+  return {
+    yaw: (yaw * 180) / Math.PI,
+    pitch: (pitch * 180) / Math.PI,
+    roll: (roll * 180) / Math.PI,
+  };
+}
+
+function getBlendshape(bs, name) {
+  if (!bs || !bs[0]) return 0;
+  const c = bs[0].categories.find((c) => c.categoryName === name);
+  return c ? c.score : 0;
+}
+
+// Smoothing
+function smooth(prev, next, alpha) {
+  return prev == null ? next : prev * (1 - alpha) + next * alpha;
+}
+let sm = {
+  yaw: 0, pitch: 0, roll: 0,
+  gazeH: 0, gazeV: 0,     // blendshape-based
+  irisH: 0, irisV: 0,     // geometric iris ratio
+  cursorLX: null, cursorLY: null,
+  cursorRX: null, cursorRY: null,
+  gazeX: null, gazeY: null,
+};
+
+// Quick-recenter offset (subtract user's "neutral" gaze when looking at center)
+let gazeCalib = { h: 0, v: 0 };
+let gazeCalibPending = false;
+let gazeSensitivityX = 2.5; // horizontal multiplier (uncalibrated)
+let gazeSensitivityY = 2.5; // vertical multiplier (uncalibrated)
+
+// Implicit (click-based) calibration state
+let implicitSamples = [];
+let implicitEnabled = true;
+let lastClickSampleTime = 0;
+let faceVisibleSince = null;
+const IMPLICIT_STORAGE_KEY = "gaze_implicit_samples_v1";
+const IMPLICIT_MAX_SAMPLES = 600;
+const IMPLICIT_MIN_FACE_MS = 250;
+const IMPLICIT_MIN_CLICK_INTERVAL_MS = 500;
+
+try {
+  const stored = localStorage.getItem(IMPLICIT_STORAGE_KEY);
+  if (stored) implicitSamples = JSON.parse(stored) || [];
+} catch (e) { console.warn("implicit load failed", e); }
+
+function saveImplicit() {
+  try { localStorage.setItem(IMPLICIT_STORAGE_KEY, JSON.stringify(implicitSamples)); }
+  catch (e) {}
+}
+
+// Full 9-point calibration state
+const CALIB_POINTS = [
+  [0.10, 0.10], [0.50, 0.10], [0.90, 0.10],
+  [0.10, 0.50], [0.50, 0.50], [0.90, 0.50],
+  [0.10, 0.90], [0.50, 0.90], [0.90, 0.90],
+];
+const CALIB_DELAY_MS = 700;       // pre-sample delay so user can settle gaze
+const CALIB_SAMPLE_MS = 1800;     // sampling window
+let calibrating = false;
+let calibIndex = 0;
+let calibPhase = "idle";          // "delay" | "sampling"
+let calibPhaseStart = 0;
+let calibSamples = [];
+let gazeModel = null;             // {wx: [...], wy: [...], featureMode, modelMode}
+
+// ---------- Model mode ----------
+// Both blendshape + iris ratio are ALWAYS used as inputs (more info = better model).
+// modelMode toggles the regression complexity.
+let modelMode = "linear";
+
+// Geometric iris ratio: compute gaze from raw iris/eye-corner landmark positions
+// Returns { gazeH, gazeV } in roughly 0–1 range (centered ~0.5)
+function irisRatioFromLandmarks(lm) {
+  // Left eye: inner corner 133, outer corner 33, iris center 468
+  // Right eye: inner corner 362, outer corner 263, iris center 473
+  // Top/bottom for vertical: left eye top 159, bottom 145; right eye top 386, bottom 374
+  const liris = lm[468], louter = lm[33],  linner = lm[133], ltop = lm[159], lbot = lm[145];
+  const riris = lm[473], router = lm[263], rinner = lm[362], rtop = lm[386], rbot = lm[374];
+
+  const lH = (liris.x - linner.x) / Math.max(1e-6, louter.x - linner.x);
+  const rH = (riris.x - rinner.x) / Math.max(1e-6, router.x - rinner.x);
+  const lV = (liris.y - ltop.y)   / Math.max(1e-6, lbot.y - ltop.y);
+  const rV = (riris.y - rtop.y)   / Math.max(1e-6, rbot.y - rtop.y);
+
+  return {
+    gazeH: ((lH + rH) / 2) - 0.5,  // center at 0
+    gazeV: ((lV + rV) / 2) - 0.5,
+  };
+}
+
+// ---------- Feature builders (always use all 6 inputs) ----------
+// Inputs: blendshape (gH, gV), iris ratio (iH, iV), head pose (hY, hP)
+function gazeFeaturesLinear(gH, gV, iH, iV, hY, hP) {
+  return [
+    1, gH, gV, iH, iV, hY, hP,   // 7 linear terms
+    gH*hY, gV*hP,                  // blendshape × head-pose cross
+    iH*hY, iV*hP,                  // iris × head-pose cross
+  ]; // 11 params
+}
+
+function gazeFeaturesQuadratic(gH, gV, iH, iV, hY, hP) {
+  return [
+    1, gH, gV, iH, iV, hY, hP,                      // linear (7)
+    gH*gH, gV*gV, iH*iH, iV*iV, hY*hY, hP*hP,      // squared (6)
+    gH*gV, gH*iH, gH*iV, gH*hY, gH*hP,              // gH × all (5)
+    gV*iH, gV*iV, gV*hY, gV*hP,                      // gV × remaining (4)
+    iH*iV, iH*hY, iH*hP,                             // iH × remaining (3)
+    iV*hY, iV*hP,                                     // iV × remaining (2)
+    hY*hP,                                            // hY × hP (1)
+  ]; // 28 params
+}
+
+function gazeFeatures(gH, gV, iH, iV, hY, hP) {
+  return modelMode === "quadratic"
+    ? gazeFeaturesQuadratic(gH, gV, iH, iV, hY, hP)
+    : gazeFeaturesLinear(gH, gV, iH, iV, hY, hP);
+}
+
+function solveLinear(A, b) {
+  // Gaussian elimination with partial pivot. A is n×n, b is n.
+  const n = A.length;
+  const M = A.map((row, i) => [...row, b[i]]);
+  for (let i = 0; i < n; i++) {
+    let maxRow = i;
+    for (let k = i + 1; k < n; k++) {
+      if (Math.abs(M[k][i]) > Math.abs(M[maxRow][i])) maxRow = k;
+    }
+    [M[i], M[maxRow]] = [M[maxRow], M[i]];
+    if (Math.abs(M[i][i]) < 1e-9) return null;
+    for (let k = i + 1; k < n; k++) {
+      const f = M[k][i] / M[i][i];
+      for (let j = i; j <= n; j++) M[k][j] -= f * M[i][j];
+    }
+  }
+  const x = new Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    let s = M[i][n];
+    for (let j = i + 1; j < n; j++) s -= M[i][j] * x[j];
+    x[i] = s / M[i][i];
+  }
+  return x;
+}
+
+function fitLeastSquares(featRows, targets) {
+  const n = featRows[0].length;
+  const ATA = Array.from({ length: n }, () => new Array(n).fill(0));
+  const ATb = new Array(n).fill(0);
+  for (let i = 0; i < featRows.length; i++) {
+    const f = featRows[i], t = targets[i];
+    for (let j = 0; j < n; j++) {
+      ATb[j] += f[j] * t;
+      for (let k = 0; k < n; k++) ATA[j][k] += f[j] * f[k];
+    }
+  }
+  // Tikhonov regularization to keep matrix well-conditioned
+  for (let i = 0; i < n; i++) ATA[i][i] += 1e-3;
+  return solveLinear(ATA, ATb);
+}
+
+function fitGazeModel(samples) {
+  const minSamples = modelMode === "quadratic" ? 40 : 15;
+  if (samples.length < minSamples) return null;
+
+  const feats = samples.map(s => gazeFeatures(
+    s.gazeH,                          // blendshape H
+    s.gazeV,                          // blendshape V
+    s.irisH != null ? s.irisH : 0,   // iris ratio H (fallback 0 for old samples)
+    s.irisV != null ? s.irisV : 0,   // iris ratio V
+    s.headYaw, s.headPitch,
+  ));
+  const wx = fitLeastSquares(feats, samples.map(s => s.screenX));
+  const wy = fitLeastSquares(feats, samples.map(s => s.screenY));
+  if (!wx || !wy) return null;
+  return { wx, wy, modelMode };
+}
+
+function applyGazeModel(model, gH, gV, iH, iV, hY, hP) {
+  const f = gazeFeatures(gH, gV, iH, iV, hY, hP);
+  let x = 0, y = 0;
+  for (let i = 0; i < f.length; i++) {
+    x += f[i] * model.wx[i];
+    y += f[i] * model.wy[i];
+  }
+  return { x, y };
+}
+
+// --- Calibration UI control ---
+const calibOverlay = document.getElementById("calib-overlay");
+const calibTarget = document.getElementById("calib-target");
+const calibRing = document.getElementById("calib-ring");
+const calibProgress = document.getElementById("calib-progress");
+const calibInstruction = document.getElementById("calib-instruction");
+
+function startCalibration() {
+  calibrating = true;
+  calibIndex = 0;
+  calibSamples = [];
+  calibOverlay.classList.add("active");
+  cursorGaze.classList.remove("visible");
+  positionCalibTarget();
+  beginCalibPoint();
+}
+
+function cancelCalibration() {
+  calibrating = false;
+  calibOverlay.classList.remove("active");
+}
+
+function positionCalibTarget() {
+  const [nx, ny] = CALIB_POINTS[calibIndex];
+  const px = nx * window.innerWidth;
+  const py = ny * window.innerHeight;
+  calibTarget.style.left = px + "px";
+  calibTarget.style.top  = py + "px";
+  calibRing.style.left = px + "px";
+  calibRing.style.top  = py + "px";
+  calibProgress.textContent = `${calibIndex + 1} / ${CALIB_POINTS.length}`;
+}
+
+function beginCalibPoint() {
+  calibPhase = "delay";
+  calibPhaseStart = performance.now();
+  calibRing.style.transform = "translate(-50%, -50%) scale(2.4)";
+  calibRing.style.opacity = "0.2";
+  calibInstruction.innerHTML =
+    `Look at the dot. <strong>Slightly tilt your head</strong> while keeping your eyes locked on it.`;
+}
+
+function tickCalibration(latestSample) {
+  if (!calibrating) return;
+  const elapsed = performance.now() - calibPhaseStart;
+
+  if (calibPhase === "delay") {
+    // Animate ring shrinking as a "get ready" cue
+    const t = Math.min(1, elapsed / CALIB_DELAY_MS);
+    const scale = 2.4 - t * 1.4; // 2.4 → 1.0
+    calibRing.style.transform = `translate(-50%, -50%) scale(${scale})`;
+    calibRing.style.opacity = String(0.2 + t * 0.6);
+    if (elapsed >= CALIB_DELAY_MS) {
+      calibPhase = "sampling";
+      calibPhaseStart = performance.now();
+      calibInstruction.innerHTML =
+        `Sampling… keep your eyes on the dot. Try a little head tilt.`;
+    }
+    return;
+  }
+
+  if (calibPhase === "sampling") {
+    // Animate ring as countdown
+    const t = Math.min(1, elapsed / CALIB_SAMPLE_MS);
+    calibRing.style.transform = `translate(-50%, -50%) scale(${1 - t * 0.7})`;
+    calibRing.style.opacity = String(0.8 - t * 0.6);
+
+    if (latestSample) {
+      const [nx, ny] = CALIB_POINTS[calibIndex];
+      calibSamples.push({
+        gazeH: latestSample.gazeH, gazeV: latestSample.gazeV,
+        irisH: latestSample.irisH, irisV: latestSample.irisV,
+        headYaw: latestSample.headYaw, headPitch: latestSample.headPitch,
+        screenX: nx * window.innerWidth,
+        screenY: ny * window.innerHeight,
+      });
+    }
+
+    if (elapsed >= CALIB_SAMPLE_MS) {
+      calibIndex++;
+      if (calibIndex >= CALIB_POINTS.length) {
+        finishCalibration();
+      } else {
+        positionCalibTarget();
+        beginCalibPoint();
+      }
+    }
+  }
+}
+
+function finishCalibration() {
+  calibrating = false;
+  calibOverlay.classList.remove("active");
+  refitFromAllSamples();
+}
+
+// Refit using both explicit (9-point) and implicit (click-based) samples
+function refitFromAllSamples() {
+  const all = [...calibSamples, ...implicitSamples];
+  const model = fitGazeModel(all);
+  if (model) {
+    gazeModel = model;
+  }
+  document.getElementById("calib-status").textContent =
+    `${calibSamples.length} explicit + ${implicitSamples.length} implicit`;
+  document.getElementById("implicit-count").textContent = implicitSamples.length;
+}
+
+// ---- Implicit (click) calibration ----
+function showImplicitFlash(x, y) {
+  const dot = document.createElement("div");
+  dot.style.cssText = `
+    position: fixed; left: ${x}px; top: ${y}px;
+    width: 10px; height: 10px;
+    border: 1px solid rgba(0,0,0,0.55);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 100;
+    transition: opacity 0.7s ease, transform 0.7s ease;
+  `;
+  document.body.appendChild(dot);
+  requestAnimationFrame(() => {
+    dot.style.opacity = "0";
+    dot.style.transform = "translate(-50%, -50%) scale(3.2)";
+  });
+  setTimeout(() => dot.remove(), 800);
+}
+
+document.addEventListener("click", (e) => {
+  if (!implicitEnabled) return;
+  if (calibrating) return;
+  // Skip clicks on UI panels / interactive controls
+  if (e.target.closest(".stats-panel, .calib-overlay, .pip, button, input, label")) return;
+
+  const now = performance.now();
+  if (!faceVisibleSince || (now - faceVisibleSince) < IMPLICIT_MIN_FACE_MS) return;
+  if (now - lastClickSampleTime < IMPLICIT_MIN_CLICK_INTERVAL_MS) return;
+  lastClickSampleTime = now;
+
+  implicitSamples.push({
+    gazeH: sm.gazeH, gazeV: sm.gazeV,     // blendshape features
+    irisH: sm.irisH, irisV: sm.irisV,     // geometric iris features
+    headYaw: sm.yaw, headPitch: sm.pitch,
+    screenX: e.clientX, screenY: e.clientY,
+    ts: Date.now(),
+  });
+  if (implicitSamples.length > IMPLICIT_MAX_SAMPLES) {
+    implicitSamples = implicitSamples.slice(-IMPLICIT_MAX_SAMPLES);
+  }
+  saveImplicit();
+
+  if (implicitSamples.length + calibSamples.length >= 8) {
+    refitFromAllSamples();
+  } else {
+    document.getElementById("implicit-count").textContent = implicitSamples.length;
+  }
+  showImplicitFlash(e.clientX, e.clientY);
+}, true);
+
+// ---------- Main loop ----------
+let frameCount = 0;
+let fpsTime = performance.now();
+
+function loop() {
+  const now = performance.now();
+
+  if (video.readyState >= 2 && video.currentTime !== lastTime) {
+    lastTime = video.currentTime;
+    const handResults = handLandmarker.detectForVideo(video, now);
+    const faceResults = faceLandmarker.detectForVideo(video, now);
+    update(handResults, faceResults);
+  }
+
+  // Slow drift on background particles for atmosphere
+  bgPoints.rotation.y += 0.0008;
+  torsoPoints.rotation.y = Math.sin(now * 0.0003) * 0.04;
+
+  renderer.render(scene, camera);
+
+  // FPS
+  frameCount++;
+  if (now - fpsTime > 500) {
+    const fps = Math.round((frameCount * 1000) / (now - fpsTime));
+    document.getElementById("fps").textContent = fps + " fps";
+    frameCount = 0;
+    fpsTime = now;
+  }
+
+  requestAnimationFrame(loop);
+}
+
+// ---------- Update everything ----------
+function update(handResults, faceResults) {
+  // Clear PiP overlay canvas
+  overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+
+  // ====== FACE ======
+  let euler = null, gazeH = 0, gazeV = 0;
+  let faceVisible = false;
+
+  if (faceResults.faceLandmarks && faceResults.faceLandmarks.length > 0) {
+    faceVisible = true;
+    const lm = faceResults.faceLandmarks[0];
+    document.getElementById("face-detected").textContent = "yes";
+
+    // ----- Update face/eye/iris/hair point clouds -----
+    {
+      const aspect = (video.videoWidth || 16) / (video.videoHeight || 9);
+      const FSCALE = 0.9;
+      const ZS = aspect * 1.8;
+
+      function writeLandmarkSamples(points, defs) {
+        const arr = points.geometry.attributes.position.array;
+        for (let i = 0; i < defs.length; i++) {
+          const d = defs[i];
+          let px, py, pz;
+          if (d.type === 'point') {
+            const p = lm[d.idx];
+            px = p.x; py = p.y; pz = p.z;
+          } else {
+            const a = lm[d.a], b = lm[d.b];
+            const t = d.t, omt = 1 - t;
+            px = a.x * omt + b.x * t;
+            py = a.y * omt + b.y * t;
+            pz = a.z * omt + b.z * t;
+          }
+          arr[i*3+0] = (0.5 - px) * FSCALE * aspect + d.ox;
+          arr[i*3+1] = (0.5 - py) * FSCALE + d.oy;
+          arr[i*3+2] = -pz * FSCALE * ZS / 1.8 + d.oz;
+        }
+        points.geometry.attributes.position.needsUpdate = true;
+        points.visible = true;
+      }
+
+      writeLandmarkSamples(facePoints, FACE_SAMPLE_DEFS);
+
+      // ----- Radial iris/pupil sampling (annulus + disc shapes) -----
+      // Compute per-eye center + per-axis radii in normalized image coords each frame.
+      const leftCenter  = lm[468];
+      const rightCenter = lm[473];
+      function eyeRadii(center, ringIdxs) {
+        let rx = 0, ry = 0;
+        for (const i of ringIdxs) {
+          rx = Math.max(rx, Math.abs(lm[i].x - center.x));
+          ry = Math.max(ry, Math.abs(lm[i].y - center.y));
+        }
+        return { rx, ry };
+      }
+      const lR = eyeRadii(leftCenter,  [469, 470, 471, 472]);
+      const rR = eyeRadii(rightCenter, [474, 475, 476, 477]);
+
+      function writeRadialSamples(points, defs) {
+        const arr = points.geometry.attributes.position.array;
+        for (let i = 0; i < defs.length; i++) {
+          const d = defs[i];
+          const isLeft = d.side === "left";
+          const c = isLeft ? leftCenter : rightCenter;
+          const r = isLeft ? lR : rR;
+          const cosA = Math.cos(d.angle);
+          const sinA = Math.sin(d.angle);
+          const px = c.x + cosA * r.rx * d.rNorm + d.ox;
+          const py = c.y + sinA * r.ry * d.rNorm + d.oy;
+          const pz = c.z + d.oz;
+          arr[i*3+0] = (0.5 - px) * FSCALE * aspect;
+          arr[i*3+1] = (0.5 - py) * FSCALE;
+          arr[i*3+2] = -pz * FSCALE * ZS / 1.8;
+        }
+        points.geometry.attributes.position.needsUpdate = true;
+        points.visible = true;
+      }
+      writeRadialSamples(irisRingPoints, IRIS_RING_SAMPLE_DEFS);
+      writeRadialSamples(pupilPoints,    PUPIL_SAMPLE_DEFS);
+
+    }
+
+    // Draw face on PiP
+    if (showMesh) {
+      drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_TESSELATION,
+        { color: "rgba(110,231,183,0.18)", lineWidth: 0.5 });
+    }
+    drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE, { color: "#6ee7b7", lineWidth: 1.5 });
+    drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_LEFT_EYE,  { color: "#6ee7b7", lineWidth: 1.5 });
+    drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_RIGHT_IRIS,{ color: "#fbbf24", lineWidth: 2 });
+    drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_LEFT_IRIS, { color: "#fbbf24", lineWidth: 2 });
+    drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_FACE_OVAL, { color: "#6ee7b7", lineWidth: 1 });
+
+    // Head pose
+    const matrices = faceResults.facialTransformationMatrixes;
+    if (matrices && matrices.length > 0) {
+      euler = matrixToEuler(matrices[0]);
+      sm.yaw   = smooth(sm.yaw,   euler.yaw,   0.4);
+      sm.pitch = smooth(sm.pitch, euler.pitch, 0.4);
+      sm.roll  = smooth(sm.roll,  euler.roll,  0.4);
+      document.getElementById("head-yaw").textContent   = sm.yaw.toFixed(1) + "°";
+      document.getElementById("head-pitch").textContent = sm.pitch.toFixed(1) + "°";
+      document.getElementById("head-roll").textContent  = sm.roll.toFixed(1) + "°";
+    }
+
+    // Gaze blendshapes
+    const bs = faceResults.faceBlendshapes;
+    const lookInL  = getBlendshape(bs, "eyeLookInLeft");
+    const lookOutL = getBlendshape(bs, "eyeLookOutLeft");
+    const lookInR  = getBlendshape(bs, "eyeLookInRight");
+    const lookOutR = getBlendshape(bs, "eyeLookOutRight");
+    const lookUpL   = getBlendshape(bs, "eyeLookUpLeft");
+    const lookDownL = getBlendshape(bs, "eyeLookDownLeft");
+    const lookUpR   = getBlendshape(bs, "eyeLookUpRight");
+    const lookDownR = getBlendshape(bs, "eyeLookDownRight");
+
+    const horizL = lookOutL - lookInL;
+    const horizR = lookInR - lookOutR;
+    gazeH = (horizL + horizR) / 2;
+    gazeV = ((lookUpL + lookUpR) - (lookDownL + lookDownR)) / 2;
+    sm.gazeH = smooth(sm.gazeH, gazeH, 0.35);
+    sm.gazeV = smooth(sm.gazeV, gazeV, 0.35);
+
+    // Geometric iris ratio (alternative feature source)
+    const irisR = irisRatioFromLandmarks(lm);
+    sm.irisH = smooth(sm.irisH, irisR.gazeH, 0.35);
+    sm.irisV = smooth(sm.irisV, irisR.gazeV, 0.35);
+
+    setBipolar("gaze-h", sm.gazeH);
+    setBipolar("gaze-v", -sm.gazeV);
+    document.getElementById("gaze-h-val").textContent = sm.gazeH.toFixed(2);
+    document.getElementById("gaze-v-val").textContent = sm.gazeV.toFixed(2);
+    document.getElementById("blink-l").textContent = getBlendshape(bs, "eyeBlinkLeft").toFixed(2);
+    document.getElementById("blink-r").textContent = getBlendshape(bs, "eyeBlinkRight").toFixed(2);
+
+    // Quick recenter capture
+    if (gazeCalibPending) {
+      gazeCalib = { h: sm.gazeH, v: sm.gazeV };
+      gazeCalibPending = false;
+    }
+
+    // Feed calibration loop with current sample (store both feature sets)
+    if (calibrating) {
+      tickCalibration({
+        gazeH: sm.gazeH, gazeV: sm.gazeV,
+        irisH: sm.irisH, irisV: sm.irisV,
+        headYaw: sm.yaw, headPitch: sm.pitch,
+      });
+    }
+
+    // ----- Project gaze to screen for cursor -----
+    if (showGaze && !calibrating) {
+      let sx, sy;
+      if (gazeModel) {
+        const p = applyGazeModel(gazeModel, sm.gazeH, sm.gazeV, sm.irisH, sm.irisV, sm.yaw, sm.pitch);
+        sx = p.x; sy = p.y;
+      } else {
+        const adjH = sm.gazeH - gazeCalib.h;
+        const adjV = sm.gazeV - gazeCalib.v;
+        sx = window.innerWidth  * (0.5 - adjH * gazeSensitivityX);
+        sy = window.innerHeight * (0.5 - adjV * gazeSensitivityY);
+      }
+      sm.gazeX = smooth(sm.gazeX, sx, 0.18);
+      sm.gazeY = smooth(sm.gazeY, sy, 0.18);
+      cursorGaze.style.left = sm.gazeX + "px";
+      cursorGaze.style.top  = sm.gazeY + "px";
+      cursorGaze.classList.add("visible");
+      if (mouseCtl.source === "gaze") {
+        mcMoveNormalized(sm.gazeX / window.innerWidth, sm.gazeY / window.innerHeight);
+      }
+    } else {
+      cursorGaze.classList.remove("visible");
+    }
+  } else {
+    document.getElementById("face-detected").textContent = "no";
+    cursorGaze.classList.remove("visible");
+    facePoints.visible = false;
+    irisRingPoints.visible = false;
+    pupilPoints.visible = false;
+    faceVisibleSince = null;
+  }
+  if (faceVisible && !faceVisibleSince) faceVisibleSince = performance.now();
+
+  // ====== HANDS ======
+  const hands = handResults.landmarks || [];
+  const handsWorld = handResults.worldLandmarks || [];
+  const handedness = handResults.handednesses || [];
+  document.getElementById("hand-count").textContent = hands.length;
+  const handDetails = document.getElementById("hand-details");
+  handDetails.innerHTML = "";
+
+  // Hide hand point clouds; re-show as detected
+  handLeftPoints.visible = false;
+  handRightPoints.visible = false;
+  cursorL.classList.remove("visible");
+  cursorR.classList.remove("visible");
+
+  hands.forEach((lm, i) => {
+    const hd = handedness[i]?.[0]?.categoryName || "?";
+    const isRight = hd === "Right"; // MediaPipe's "Right" = your right hand (un-mirrored)
+
+    drawingUtils.drawConnectors(lm, HandLandmarker.HAND_CONNECTIONS, { color: "#6ee7b7", lineWidth: 2 });
+    drawingUtils.drawLandmarks(lm, { color: "#fbbf24", radius: 2 });
+
+    // Pinch
+    const thumb = lm[4];
+    const index = lm[8];
+    const wrist = lm[0];
+    const middleMcp = lm[9];
+    const handSize = distance(wrist, middleMcp);
+    const pinchNorm = distance(thumb, index) / handSize;
+    const isPinching = pinchNorm < 0.4;
+
+    // ---- Screen cursor from index fingertip ----
+    // Mirror x because we display the camera mirrored
+    const sx = (1 - index.x) * window.innerWidth;
+    const sy = index.y * window.innerHeight;
+    const cursorEl = isRight ? cursorR : cursorL;
+    const smoothKey = isRight ? "R" : "L";
+    sm["cursor"+smoothKey+"X"] = smooth(sm["cursor"+smoothKey+"X"], sx, 0.5);
+    sm["cursor"+smoothKey+"Y"] = smooth(sm["cursor"+smoothKey+"Y"], sy, 0.5);
+    cursorEl.style.left = sm["cursor"+smoothKey+"X"] + "px";
+    cursorEl.style.top  = sm["cursor"+smoothKey+"Y"] + "px";
+    cursorEl.classList.add("visible");
+    cursorEl.classList.toggle("pinching", isPinching);
+
+    // System mouse bridge: forward this hand's coords if it is the selected source
+    if ((mouseCtl.source === "right" && isRight) ||
+        (mouseCtl.source === "left"  && !isRight)) {
+      mcMoveNormalized(
+        sm["cursor"+smoothKey+"X"] / window.innerWidth,
+        sm["cursor"+smoothKey+"Y"] / window.innerHeight
+      );
+    }
+    mcHandlePinch(smoothKey, isPinching);
+
+    // ---- 3D hand point cloud (jittered, dense) ----
+    const handPoints = isRight ? handRightPoints : handLeftPoints;
+    {
+      const aspect = (video.videoWidth || 16) / (video.videoHeight || 9);
+      const FSCALE = 0.9;
+      const arr = handPoints.geometry.attributes.position.array;
+      const defs = HAND_SAMPLE_DEFS;
+      for (let j = 0; j < defs.length; j++) {
+        const d = defs[j];
+        let px, py, pz;
+        if (d.type === 'point') {
+          const p = lm[d.idx];
+          px = p.x; py = p.y; pz = p.z;
+        } else {
+          const a = lm[d.a], b = lm[d.b];
+          const t = d.t, omt = 1 - t;
+          px = a.x * omt + b.x * t;
+          py = a.y * omt + b.y * t;
+          pz = a.z * omt + b.z * t;
+        }
+        arr[j*3+0] = (0.5 - px) * FSCALE * aspect + d.ox;
+        arr[j*3+1] = (0.5 - py) * FSCALE + d.oy;
+        arr[j*3+2] = -pz * FSCALE * aspect * 0.6 + d.oz;
+      }
+      handPoints.geometry.attributes.position.needsUpdate = true;
+      handPoints.visible = true;
+    }
+
+    // ---- Game hit detection (in screen space) ----
+    if (game.active && game.target && isPinching) {
+      const tx = game.target.x;
+      const ty = game.target.y;
+      const d = Math.hypot(sx - tx, sy - ty);
+      if (d < 50) popTarget();
+    }
+
+    // Stats row
+    const div = document.createElement("div");
+    div.innerHTML = `
+      <div class="row"><span class="label">Hand ${i+1} (${hd})</span>
+        <span class="badge ${isPinching ? 'active' : ''}">${isPinching ? 'PINCH' : 'open'}</span></div>
+      <div class="row"><span class="label">Pinch dist</span><span class="value">${pinchNorm.toFixed(2)}</span></div>
+    `;
+    handDetails.appendChild(div);
+  });
+}
+
+function setBipolar(id, val) {
+  const el = document.getElementById(id);
+  const clamped = Math.max(-1, Math.min(1, val));
+  const widthPct = Math.abs(clamped) * 50;
+  el.style.width = widthPct + "%";
+  el.style.left = (clamped >= 0 ? 50 : 50 - widthPct) + "%";
+}
+
+// ---------- Game ----------
+const game = { active: false, target: null, spawnTime: 0, score: 0, totalTime: 0, hits: 0 };
+
+function spawnTarget() {
+  // Targets in screen pixels, comfortable zone
+  game.target = {
+    x: window.innerWidth * (0.15 + Math.random() * 0.7),
+    y: window.innerHeight * (0.2 + Math.random() * 0.6),
+  };
+  game.spawnTime = performance.now();
+  renderTarget();
+}
+function renderTarget() {
+  targetGameEl.innerHTML = "";
+  if (!game.target) return;
+  const el = document.createElement("div");
+  el.className = "target";
+  el.style.left = game.target.x + "px";
+  el.style.top  = game.target.y + "px";
+  targetGameEl.appendChild(el);
+}
+function popTarget() {
+  const elapsed = performance.now() - game.spawnTime;
+  game.hits++;
+  game.totalTime += elapsed;
+  game.score++;
+  document.getElementById("score").textContent = game.score;
+  document.getElementById("avg-time").textContent =
+    (game.totalTime / game.hits / 1000).toFixed(2) + "s";
+  spawnTarget();
+}
+
+document.getElementById("toggle-game").addEventListener("click", (e) => {
+  game.active = !game.active;
+  if (game.active) {
+    game.score = 0; game.hits = 0; game.totalTime = 0;
+    document.getElementById("score").textContent = "0";
+    document.getElementById("avg-time").textContent = "—";
+    spawnTarget();
+    e.target.textContent = "Stop game";
+  } else {
+    game.target = null;
+    targetGameEl.innerHTML = "";
+    e.target.textContent = "Start pinch-to-pop game";
+  }
+});
+
+document.getElementById("toggle-mesh").addEventListener("click", () => { showMesh = !showMesh; });
+document.getElementById("toggle-gaze").addEventListener("click", () => {
+  showGaze = !showGaze;
+  if (!showGaze) cursorGaze.classList.remove("visible");
+});
+document.getElementById("recenter-gaze").addEventListener("click", () => {
+  gazeCalibPending = true;
+});
+document.getElementById("model-mode").addEventListener("change", (e) => {
+  modelMode = e.target.value;
+  refitFromAllSamples();
+});
+document.getElementById("calibrate-gaze").addEventListener("click", startCalibration);
+document.getElementById("calib-cancel").addEventListener("click", cancelCalibration);
+document.getElementById("reset-calib").addEventListener("click", () => {
+  gazeModel = null;
+  calibSamples = [];
+  document.getElementById("calib-status").textContent = "none";
+});
+document.getElementById("implicit-enabled").addEventListener("change", (e) => {
+  implicitEnabled = e.target.checked;
+});
+document.getElementById("clear-implicit").addEventListener("click", () => {
+  if (!confirm("Clear all stored click-calibration samples?")) return;
+  implicitSamples = [];
+  saveImplicit();
+  document.getElementById("implicit-count").textContent = "0";
+  refitFromAllSamples();
+});
+
+// On startup: if we already have implicit samples from previous sessions, refit
+if (implicitSamples.length >= 8) {
+  refitFromAllSamples();
+} else {
+  document.getElementById("implicit-count").textContent = implicitSamples.length;
+}
+document.getElementById("mc-connect").addEventListener("click", mcConnect);
+document.getElementById("mc-enabled").addEventListener("change", (e) => {
+  mouseCtl.enabled = e.target.checked;
+  if (mouseCtl.enabled && !mouseCtl.connected) mcConnect();
+  // Release any held pinch-drag when turning off
+  if (!mouseCtl.enabled && mouseCtl.connected) {
+    if (mouseCtl.pinchState.L || mouseCtl.pinchState.R) mcSend({ type: "up" });
+    mouseCtl.pinchState.L = false;
+    mouseCtl.pinchState.R = false;
+  }
+});
+document.getElementById("mc-source").addEventListener("change", (e) => {
+  mouseCtl.source = e.target.value;
+});
+document.getElementById("mc-pinch-click").addEventListener("change", (e) => {
+  mouseCtl.pinchToClick = e.target.checked;
+});
+
+document.getElementById("sens-x-slider").addEventListener("input", (e) => {
+  gazeSensitivityX = parseFloat(e.target.value);
+  document.getElementById("sens-x-val").textContent = gazeSensitivityX.toFixed(1);
+});
+document.getElementById("sens-y-slider").addEventListener("input", (e) => {
+  gazeSensitivityY = parseFloat(e.target.value);
+  document.getElementById("sens-y-val").textContent = gazeSensitivityY.toFixed(1);
+});
+
+// Panel collapse / expand
+const panelEl = document.getElementById("stats-panel");
+const PANEL_COLLAPSED_KEY = "panel_collapsed_v1";
+function setPanelCollapsed(c) {
+  panelEl.classList.toggle("collapsed", c);
+  try { localStorage.setItem(PANEL_COLLAPSED_KEY, c ? "1" : "0"); } catch (e) {}
+}
+document.getElementById("panel-toggle").addEventListener("click", (e) => {
+  e.stopPropagation();
+  setPanelCollapsed(!panelEl.classList.contains("collapsed"));
+});
+panelEl.addEventListener("click", (e) => {
+  // Clicking the collapsed pill anywhere expands it
+  if (panelEl.classList.contains("collapsed")) {
+    e.stopPropagation();
+    setPanelCollapsed(false);
+  }
+});
+try {
+  if (localStorage.getItem(PANEL_COLLAPSED_KEY) === "1") setPanelCollapsed(true);
+} catch (e) {}
+
+// View mode toggle
+document.body.classList.add("mode-avatar");
+function setMode(mode) {
+  document.body.classList.toggle("mode-avatar", mode === "avatar");
+  document.body.classList.toggle("mode-camera", mode === "camera");
+  document.getElementById("mode-avatar").classList.toggle("active", mode === "avatar");
+  document.getElementById("mode-camera").classList.toggle("active", mode === "camera");
+}
+document.getElementById("mode-avatar").addEventListener("click", () => setMode("avatar"));
+document.getElementById("mode-camera").addEventListener("click", () => setMode("camera"));
+
+setup();
+</script>
+
+</body>
+</html>
