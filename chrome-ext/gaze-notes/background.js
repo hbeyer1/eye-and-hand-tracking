@@ -79,6 +79,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } else if (msg.type === "stateSnapshot") {
         // Offscreen is asking us to persist updated state
         await saveState(msg.state);
+      } else if (msg.type === "setupError") {
+        globalThis.__gazeLastError = msg.error;
       }
       sendResponse({ ok: true });
       return;
@@ -102,7 +104,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.from === "popup") {
       if (msg.type === "getStats") {
-        sendResponse(globalThis.__gazeStats || { samples: 0, rmse: null });
+        const s = globalThis.__gazeStats || { samples: 0, rmse: null };
+        s.lastError = globalThis.__gazeLastError || null;
+        sendResponse(s);
         return;
       }
       if (msg.type === "reset") {
@@ -128,6 +132,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg.type === "getDebug") {
         const state = await loadState();
         sendResponse({ debug: !!(state && state.debug) });
+        return;
+      }
+      if (msg.type === "restartOffscreen") {
+        // Kill and recreate the offscreen doc so it picks up newly-granted
+        // camera permission.
+        try { await chrome.offscreen.closeDocument(); } catch (e) {}
+        await ensureOffscreen();
+        sendResponse({ ok: true });
         return;
       }
     }

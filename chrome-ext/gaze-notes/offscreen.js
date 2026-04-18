@@ -64,7 +64,13 @@ bootPort.onMessage.addListener((msg) => {
       if (typeof msg.state.lambda === "number") lambda = msg.state.lambda;
     } catch (e) { console.warn("failed to hydrate state", e); }
   }
-  setup().catch(err => console.error("offscreen setup failed", err));
+  setup().catch(err => {
+    console.error("offscreen setup failed", err);
+    chrome.runtime.sendMessage({
+      from: "offscreen", type: "setupError",
+      error: err && err.message ? err.message : String(err),
+    }).catch(() => {});
+  });
 });
 
 // ============================================================

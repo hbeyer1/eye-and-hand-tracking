@@ -49,9 +49,12 @@
   <button id="toggle-debug" class="primary">Toggle dot</button>
   <button id="reset">Reset calibration</button>
 </div>
-<div class="hint" style="margin-top:10px;">
-  Need to grant camera permission once — open any HTTP(S) tab after install
-  and Chrome will prompt.
+<div class="actions" style="margin-top:6px;">
+  <button id="grant-camera">Grant camera access</button>
+</div>
+<div class="hint" style="margin-top:10px;" id="grant-hint">
+  First run? Click <b>Grant camera access</b> — Chrome will prompt. Once
+  granted, the offscreen document picks up the camera automatically.
 </div>
 <script src="popup.js"></script>
 </body>
