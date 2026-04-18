@@ -741,6 +741,14 @@
       <span class="label">WebGazer status</span>
       <span class="value" id="wg-status">idle</span>
     </div>
+    <div class="row" style="margin-top:4px;">
+      <span class="label">
+        <input type="checkbox" id="laser-autoaim" checked
+               style="vertical-align:middle;margin-right:4px;accent-color:var(--accent);" />
+        Auto-aim
+      </span>
+      <span class="value" id="laser-autoaim-val">on</span>
+    </div>
     <div class="hint">
       Dogs appear on screen. Look at them — red lasers shoot from your eyes. Hold your gaze on a dog for ~0.4s to vaporize it. Both sources calibrate from clicks; switch to WebGazer to compare. Press <strong>L</strong> to toggle.
     </div>
@@ -1858,6 +1866,13 @@ const laserGame = {
   aimX: null,
   aimY: null,
   aimTauMs: 260,
+  // Auto-aim: when the smoothed gaze is within snapRadius of a dog,
+  // pull the aim point toward that dog's center. Pull strength scales
+  // quadratically with closeness, so the cursor still moves naturally
+  // near the edge of the snap zone and locks on tight near the center.
+  autoAim: true,
+  snapRadius: 130,
+  snapMax: 0.95,
 };
 
 // Gaze source selector — lets the game pick between v1's built-in
@@ -1916,6 +1931,10 @@ function startWebGazerForLasers() {
 document.getElementById("laser-gaze-source").addEventListener("change", (e) => {
   laserGazeSource.mode = e.target.value;
   if (laserGazeSource.mode === "webgazer") startWebGazerForLasers();
+});
+document.getElementById("laser-autoaim").addEventListener("change", (e) => {
+  laserGame.autoAim = e.target.checked;
+  document.getElementById("laser-autoaim-val").textContent = e.target.checked ? "on" : "off";
 });
 
 const DOG_SVG = `
@@ -2040,6 +2059,27 @@ function tickLaserGame() {
     gy = laserGame.aimY;
   } else {
     laserGame.aimX = laserGame.aimY = null;
+  }
+
+  // Auto-aim: magnetic pull toward the nearest dog within snapRadius.
+  // Does NOT mutate aimX/aimY — it only adjusts the value used this frame
+  // for laser positioning and hit detection, so the EMA keeps tracking
+  // the real gaze underneath the snap.
+  if (gazeValid && laserGame.autoAim && laserGame.dogs.length) {
+    let closest = null, closestD2 = laserGame.snapRadius * laserGame.snapRadius;
+    for (const d of laserGame.dogs) {
+      if (d.dying) continue;
+      const dx = gx - d.x, dy = gy - d.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < closestD2) { closestD2 = d2; closest = d; }
+    }
+    if (closest) {
+      const dist = Math.sqrt(closestD2);
+      const t = 1 - dist / laserGame.snapRadius;   // 0 at edge, 1 at center
+      const pull = Math.min(laserGame.snapMax, t * t + 0.12);
+      gx += pull * (closest.x - gx);
+      gy += pull * (closest.y - gy);
+    }
   }
 
   // Position lasers from each eye to the gaze point
