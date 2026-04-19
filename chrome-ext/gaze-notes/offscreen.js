@@ -45,6 +45,9 @@ const stream = { sum: 0, n: 0 };
 
 let lastBroadcastAt = 0;
 const BROADCAST_INTERVAL_MS = 1000 / 30; // ~30 Hz
+let framesSeen = 0;         // camera frames processed since startup
+let faceFramesSeen = 0;     // of those, how many had a face
+let lastClickAt = 0;        // epoch ms of most recent addSample we received
 
 // ============================================================
 // Bootstrap: fetch persisted state from SW, then init
@@ -114,6 +117,8 @@ function loop() {
     lastTime = video.currentTime;
     const res = faceLandmarker.detectForVideo(video, now);
     computeFeatures(res);
+    framesSeen++;
+    if (curFeat) faceFramesSeen++;
     if (now - lastBroadcastAt >= BROADCAST_INTERVAL_MS) {
       lastBroadcastAt = now;
       broadcastGaze();
@@ -229,6 +234,10 @@ function sendStats() {
       // viewport if they want px. Normalized is tab-invariant.
       rmseNormalized: rmse_norm,
       hasModel: !!(wx && wy),
+      framesSeen,
+      faceFramesSeen,
+      faceVisible: !!curFeat,
+      lastClickAt,  // 0 if offscreen has never received a click
     },
   }).catch(() => {});
 }
@@ -311,6 +320,7 @@ function gaussSolve(A, b, n) {
 // ============================================================
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.from === "bg" && msg.type === "addSample") {
+    lastClickAt = Date.now();
     if (!curFeat) return;
     // Predict-before-train for online eval
     if (wx && wy) {

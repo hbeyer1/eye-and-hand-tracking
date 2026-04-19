@@ -2,6 +2,14 @@ function send(msg) {
   return new Promise((resolve) => chrome.runtime.sendMessage(msg, resolve));
 }
 
+function agoStr(ms) {
+  if (!ms) return "never";
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 1) return "just now";
+  if (s < 60) return s + "s ago";
+  return Math.round(s / 60) + "m ago";
+}
+
 async function refresh() {
   const s = await send({ from: "popup", type: "getStats" });
   if (!s) return;
@@ -10,6 +18,11 @@ async function refresh() {
     s.rmseNormalized == null ? "—" : s.rmseNormalized.toFixed(3);
   document.getElementById("has-model").textContent =
     s.hasModel ? "trained" : (s.lastError ? "error" : "warming up");
+  document.getElementById("face").textContent =
+    s.faceVisible ? "yes" : (s.framesSeen ? "no" : "—");
+  document.getElementById("frames").textContent =
+    `${s.faceFramesSeen ?? 0} face / ${s.framesSeen ?? 0} total`;
+  document.getElementById("last-click").textContent = agoStr(s.lastClickAt);
   if (s.lastError) {
     const hint = document.getElementById("grant-hint");
     hint.innerHTML = `<b>Setup error:</b> ${s.lastError}`;
