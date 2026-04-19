@@ -1,0 +1,1332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Gaze Duel — ours vs WebGazer</title>
+
+<!-- WebGazer classic bundle. Has to load before our module script uses it. -->
+<script src="./vendor/webgazer/www/webgazer.js"></script>
+
+<style>
+  :root {
+    --bg: #f4f3ef;
+    --panel: rgba(255,255,255,0.88);
+    --text: #1a1a1a;
+    --muted: #8a8a86;
+    --hairline: rgba(0,0,0,0.08);
+    --iris: #1d4ed8;
+    --pupil: #eab308;
+    --laser: #ef4444;
+    --ours: #111;
+    --wg: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+    height: 100%;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: crosshair;
+  }
+
+  #loading {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg); z-index: 100;
+    font-size: 13px; color: var(--muted);
+  }
+
+  /* PiP camera + rectified patches, top-left */
+  .pip {
+    position: fixed; top: 16px; left: 16px;
+    z-index: 15;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 10px;
+    display: grid;
+    grid-template-columns: 160px 1fr;
+    gap: 10px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .pip video {
+    width: 160px; height: 108px;
+    object-fit: cover; border-radius: 6px;
+    transform: scaleX(-1);
+    background: #111;
+  }
+  .pip .patches {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 6px;
+    align-content: center;
+  }
+  .pip .patches canvas {
+    width: 70px; height: 35px;
+    image-rendering: pixelated;
+    background: #000; border-radius: 4px;
+    display: block;
+  }
+  .pip .patches .lbl {
+    font-size: 9px; color: var(--muted);
+    letter-spacing: 0.04em; text-transform: uppercase;
+    grid-column: 1 / 3;
+  }
+
+  /* HUD — top-right */
+  .hud {
+    position: fixed; top: 16px; right: 16px;
+    z-index: 15;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 14px 16px;
+    min-width: 260px;
+    font-size: 12px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .hud h1 { margin: 0 0 8px 0; font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
+  .hud .round {
+    display: flex; align-items: baseline; gap: 6px;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 22px; font-weight: 600;
+    transition: transform 160ms cubic-bezier(.4,1.3,.6,1);
+  }
+  .hud .round.bump { transform: scale(1.08); }
+  .hud .round .of  { font-size: 13px; color: var(--muted); font-weight: 400; }
+  .hud .score {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 4px 10px;
+    margin-top: 8px;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px;
+  }
+  .hud .score .tag {
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .hud .score .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--ours);
+  }
+  .hud .score .dot.wg { background: var(--wg); }
+  .hud .score .wins { text-align: right; color: var(--muted); }
+  .hud .lead {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--hairline);
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.02em;
+  }
+  .hud .lead b { color: var(--text); font-weight: 600; }
+
+  /* Info panel — bottom-right */
+  .info {
+    position: fixed; bottom: 16px; right: 16px;
+    z-index: 15;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-size: 11px;
+    font-family: ui-monospace, Menlo, monospace;
+    color: var(--muted);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    display: grid;
+    grid-template-columns: auto auto;
+    gap: 2px 10px;
+  }
+  .info .v { color: var(--text); text-align: right; }
+
+  /* Legend — bottom-left */
+  .legend {
+    position: fixed; bottom: 16px; left: 16px;
+    z-index: 15;
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-size: 11px;
+    display: flex;
+    gap: 12px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .legend .item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .ring {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid var(--ours);
+    border-radius: 50%;
+    background: rgba(0,0,0,0.08);
+  }
+  .legend .ring.wg { border-color: var(--wg); background: rgba(220,38,38,0.08); }
+  .legend .sep { color: var(--muted); }
+  .legend kbd {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 10px;
+    background: rgba(0,0,0,0.06);
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid var(--hairline);
+  }
+
+  /* Calibrating banner — center-top */
+  .banner {
+    position: fixed; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 14;
+    background: var(--text);
+    color: var(--bg);
+    padding: 18px 28px;
+    border-radius: 14px;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    box-shadow: 0 14px 40px rgba(0,0,0,0.18);
+    display: none;
+    text-align: center;
+  }
+  .banner.visible { display: block; }
+  .banner .big {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 34px; font-weight: 600;
+    display: block; margin-top: 6px;
+  }
+  .banner .sub {
+    margin-top: 8px;
+    font-size: 11px;
+    color: rgba(244,243,239,0.7);
+    font-weight: 400;
+  }
+
+  /* Target dot — iris/pupil styling */
+  .target {
+    position: fixed;
+    width: 36px; height: 36px;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: var(--iris);
+    border: 2px solid var(--text);
+    box-shadow: 0 2px 8px rgba(29,78,216,0.35);
+    cursor: crosshair;
+    z-index: 8;
+    display: none;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  .target::after {
+    content: "";
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--pupil);
+    transform: translate(-50%, -50%);
+  }
+  .target.visible { display: block; }
+  @keyframes pulse {
+    0%,100% { transform: translate(-50%, -50%) scale(1); }
+    50%     { transform: translate(-50%, -50%) scale(1.12); }
+  }
+
+  /* Gaze cursors */
+  .cursor {
+    position: fixed;
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 6;
+    display: none;
+    transition: left 80ms linear, top 80ms linear;
+  }
+  .cursor.ours {
+    border: 2.5px solid var(--ours);
+    background: rgba(0,0,0,0.1);
+  }
+  .cursor.wg {
+    border: 2.5px solid var(--wg);
+    background: rgba(220,38,38,0.1);
+  }
+  .cursor.visible { display: block; }
+
+  /* Error arrow SVG overlay */
+  .arrows {
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 7;
+  }
+  .arrow-line {
+    stroke-width: 2.5;
+    fill: none;
+    opacity: 0;
+    transition: opacity 360ms ease-out;
+  }
+  .arrow-line.flash { opacity: 0.9; }
+  .arrow-line.ours { stroke: var(--ours); }
+  .arrow-line.wg   { stroke: var(--wg); }
+  .arrow-head {
+    opacity: 0;
+    transition: opacity 360ms ease-out;
+  }
+  .arrow-head.flash { opacity: 0.9; }
+
+  /* Click flash ring at click position */
+  .click-flash {
+    position: fixed;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    border: 3px solid #16a34a;
+    transform: translate(-50%, -50%) scale(1);
+    pointer-events: none;
+    z-index: 9;
+    opacity: 0;
+  }
+  .click-flash.fire {
+    animation: flashgrow 520ms ease-out forwards;
+  }
+  @keyframes flashgrow {
+    0%   { opacity: 1; transform: translate(-50%, -50%) scale(0.3); }
+    100% { opacity: 0; transform: translate(-50%, -50%) scale(3.5); }
+  }
+
+  /* Summary card */
+  .summary {
+    position: fixed; inset: 0;
+    z-index: 30;
+    background: rgba(244,243,239,0.94);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .summary.visible { display: flex; }
+  .summary .card {
+    background: white;
+    border: 1px solid var(--hairline);
+    border-radius: 16px;
+    padding: 28px 32px;
+    width: min(720px, 100%);
+    box-shadow: 0 30px 80px rgba(0,0,0,0.12);
+    text-align: center;
+  }
+  .summary h2 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .summary .trophy-wrap {
+    margin: 14px auto 4px;
+    width: 90px; height: 90px;
+  }
+  .summary .winner {
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    margin-top: 6px;
+  }
+  .summary .winner .name { color: var(--text); }
+  .summary .winner .name.wg { color: var(--wg); }
+  .summary .stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin: 22px 0 18px;
+  }
+  .summary .stats .col {
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .summary .stats .col.ours { border-color: rgba(0,0,0,0.18); }
+  .summary .stats .col.wg   { border-color: rgba(220,38,38,0.25); }
+  .summary .stats .label {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .summary .stats .name {
+    font-size: 14px; font-weight: 600;
+    margin-bottom: 10px;
+  }
+  .summary .stats .name.wg { color: var(--wg); }
+  .summary .stats .rmse {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 28px; font-weight: 600;
+  }
+  .summary .stats .rmse.win { color: #16a34a; }
+  .summary .stats .record {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--muted);
+    font-family: ui-monospace, Menlo, monospace;
+  }
+  .summary .heatmaps {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+    margin-bottom: 8px;
+  }
+  .summary .heatmaps .hm {
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    padding: 10px;
+  }
+  .summary .heatmaps .hm .t {
+    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 6px;
+  }
+  .summary .heatmaps canvas {
+    width: 100%; height: auto;
+    display: block; image-rendering: pixelated;
+    border-radius: 4px;
+  }
+  .summary .heatmaps .axes {
+    display: flex; justify-content: space-between;
+    font-size: 9px; color: var(--muted);
+    margin-top: 4px; font-family: ui-monospace, Menlo, monospace;
+  }
+  .summary .actions {
+    margin-top: 18px;
+    display: flex; justify-content: center; gap: 10px;
+  }
+  .summary button {
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    border: 1px solid var(--hairline);
+    background: white;
+    color: var(--text);
+    border-radius: 8px;
+    padding: 9px 18px;
+    font-weight: 500;
+    transition: background 120ms;
+  }
+  .summary button.primary {
+    background: var(--text); color: white; border-color: transparent;
+  }
+  .summary button.primary:hover { background: #000; }
+  .summary button:not(.primary):hover { background: rgba(0,0,0,0.03); }
+  .summary .hint {
+    font-size: 11px; color: var(--muted);
+    margin-top: 12px; letter-spacing: 0.02em;
+  }
+  .summary .hint kbd {
+    font-family: ui-monospace, Menlo, monospace;
+    background: rgba(0,0,0,0.06);
+    padding: 1px 5px; border-radius: 3px;
+    border: 1px solid var(--hairline);
+  }
+
+  /* Hide WebGazer's injected UI completely (we're running our own). */
+  #webgazerVideoContainer,
+  #webgazerGazeDot,
+  #webgazerFaceOverlay,
+  #webgazerFaceFeedbackBox {
+    display: none !important;
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">loading models…</div>
+
+<video id="webcam" autoplay playsinline muted style="display:none"></video>
+
+<!-- Camera + rectified patches -->
+<div class="pip">
+  <video id="webcam-preview" autoplay playsinline muted></video>
+  <div class="patches">
+    <div class="lbl">rectified eye patches (ours)</div>
+    <canvas id="patch-left"  width="40" height="20"></canvas>
+    <canvas id="patch-right" width="40" height="20"></canvas>
+  </div>
+</div>
+
+<!-- HUD -->
+<aside class="hud">
+  <h1>Gaze Duel</h1>
+  <div class="round" id="round-readout"><span id="round-n">0</span><span class="of">/ 12</span></div>
+  <div class="score">
+    <span class="tag"><span class="dot"></span>Ours</span>
+    <span id="lead-text">&nbsp;</span>
+    <span class="wins" id="ours-wins">0</span>
+    <span class="tag"><span class="dot wg"></span>WebGazer</span>
+    <span></span>
+    <span class="wins" id="wg-wins">0</span>
+  </div>
+  <div class="lead">
+    Last round —
+    <b>ours</b> <span id="last-ours">—</span> &middot;
+    <b>wg</b> <span id="last-wg">—</span>
+  </div>
+</aside>
+
+<!-- Live yaw/pitch info -->
+<aside class="info">
+  <span>yaw</span>  <span class="v" id="yaw">—</span>
+  <span>pitch</span><span class="v" id="pitch">—</span>
+  <span>roll</span> <span class="v" id="roll">—</span>
+</aside>
+
+<!-- Legend + hotkeys -->
+<aside class="legend">
+  <span class="item"><span class="ring"></span>ours</span>
+  <span class="item"><span class="ring wg"></span>webgazer</span>
+  <span class="sep">|</span>
+  <span class="item"><kbd>N</kbd> new match</span>
+  <span class="item"><kbd>R</kbd> reset</span>
+</aside>
+
+<!-- Banner during warm-up / summary transitions -->
+<div class="banner" id="banner">
+  <div id="banner-title">calibrating</div>
+  <div class="big" id="banner-count">0 / 8</div>
+  <div class="sub">click the dot while looking at it — seeds both models</div>
+</div>
+
+<!-- Target dot -->
+<div class="target" id="target"></div>
+
+<!-- Gaze cursors -->
+<div class="cursor ours" id="cursor-ours"></div>
+<div class="cursor wg"   id="cursor-wg"></div>
+
+<!-- Error-arrow overlay -->
+<svg class="arrows" id="arrows" width="100%" height="100%">
+  <defs>
+    <marker id="ah-ours" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#111"/>
+    </marker>
+    <marker id="ah-wg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+  <line id="arrow-ours" class="arrow-line ours" marker-end="url(#ah-ours)"/>
+  <line id="arrow-wg"   class="arrow-line wg"   marker-end="url(#ah-wg)"/>
+</svg>
+
+<!-- Click flash -->
+<div class="click-flash" id="click-flash"></div>
+
+<!-- Summary card -->
+<div class="summary" id="summary">
+  <div class="card">
+    <h2>Match result</h2>
+    <div class="trophy-wrap">
+      <svg viewBox="0 0 64 64" width="90" height="90" aria-hidden="true">
+        <defs>
+          <linearGradient id="goldgrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#fde68a"/>
+            <stop offset="1" stop-color="#b45309"/>
+          </linearGradient>
+        </defs>
+        <path d="M20 10 h24 v12 a12 12 0 0 1 -12 12 a12 12 0 0 1 -12 -12 z"
+              fill="url(#goldgrad)" stroke="#78350f" stroke-width="1.4"/>
+        <path d="M20 14 h-6 a4 4 0 0 0 -4 4 v2 a8 8 0 0 0 10 8" fill="none" stroke="#78350f" stroke-width="1.4"/>
+        <path d="M44 14 h6 a4 4 0 0 1 4 4 v2 a8 8 0 0 1 -10 8" fill="none" stroke="#78350f" stroke-width="1.4"/>
+        <rect x="27" y="34" width="10" height="8" fill="#b45309"/>
+        <rect x="22" y="42" width="20" height="4" rx="1" fill="#78350f"/>
+        <rect x="18" y="48" width="28" height="6" rx="1.5" fill="#78350f"/>
+      </svg>
+    </div>
+    <div class="winner">
+      <span class="name" id="winner-name">—</span>
+      <span id="winner-suffix"></span>
+    </div>
+    <div class="stats">
+      <div class="col ours">
+        <div class="label">Ours (rectified + pose)</div>
+        <div class="rmse" id="ours-rmse">—</div>
+        <div class="record" id="ours-record">— W · — T · — L</div>
+      </div>
+      <div class="col wg">
+        <div class="label">WebGazer (axis-aligned)</div>
+        <div class="rmse" id="wg-rmse">—</div>
+        <div class="record" id="wg-record">— W · — T · — L</div>
+      </div>
+    </div>
+    <div class="heatmaps">
+      <div class="hm">
+        <div class="t">Ours — error by yaw × pitch</div>
+        <canvas id="hm-ours" width="180" height="180"></canvas>
+        <div class="axes"><span>← yaw →</span><span>pitch ↕</span></div>
+      </div>
+      <div class="hm">
+        <div class="t">WebGazer — error by yaw × pitch</div>
+        <canvas id="hm-wg" width="180" height="180"></canvas>
+        <div class="axes"><span>← yaw →</span><span>pitch ↕</span></div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="primary" id="btn-new-match">New match</button>
+      <button id="btn-reset-all">Reset calibration</button>
+    </div>
+    <div class="hint">
+      <kbd>N</kbd> new match &middot; <kbd>R</kbd> reset calibration (clears both models)
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9"
+  }
+}
+</script>
+
+<script type="module">
+import {
+  FaceLandmarker,
+  FilesetResolver,
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9";
+
+/* =================================================================
+ * DOM refs
+ * ================================================================= */
+const video        = document.getElementById("webcam");
+const videoPreview = document.getElementById("webcam-preview");
+const loading      = document.getElementById("loading");
+const patchL       = document.getElementById("patch-left");
+const patchR       = document.getElementById("patch-right");
+const pLctx        = patchL.getContext("2d", { willReadFrequently: true });
+const pRctx        = patchR.getContext("2d", { willReadFrequently: true });
+const cursorOurs   = document.getElementById("cursor-ours");
+const cursorWG     = document.getElementById("cursor-wg");
+const target       = document.getElementById("target");
+const banner       = document.getElementById("banner");
+const bannerTitle  = document.getElementById("banner-title");
+const bannerCount  = document.getElementById("banner-count");
+const roundReadout = document.getElementById("round-readout");
+const roundN       = document.getElementById("round-n");
+const oursWins     = document.getElementById("ours-wins");
+const wgWins       = document.getElementById("wg-wins");
+const leadText     = document.getElementById("lead-text");
+const lastOursEl   = document.getElementById("last-ours");
+const lastWgEl     = document.getElementById("last-wg");
+const arrowOurs    = document.getElementById("arrow-ours");
+const arrowWG      = document.getElementById("arrow-wg");
+const clickFlash   = document.getElementById("click-flash");
+const summary      = document.getElementById("summary");
+const winnerName   = document.getElementById("winner-name");
+const winnerSuffix = document.getElementById("winner-suffix");
+const oursRmseEl   = document.getElementById("ours-rmse");
+const wgRmseEl     = document.getElementById("wg-rmse");
+const oursRecord   = document.getElementById("ours-record");
+const wgRecord     = document.getElementById("wg-record");
+const hmOursCanvas = document.getElementById("hm-ours");
+const hmWgCanvas   = document.getElementById("hm-wg");
+const yawEl        = document.getElementById("yaw");
+const pitchEl      = document.getElementById("pitch");
+const rollEl       = document.getElementById("roll");
+
+/* =================================================================
+ * Constants — match index-rectified-reg.html exactly
+ * ================================================================= */
+const PATCH_W = 40, PATCH_H = 20;
+const PIXEL_DIMS_PER_EYE = PATCH_W * PATCH_H;
+const TOTAL_PIXEL_DIMS   = PIXEL_DIMS_PER_EYE * 2;
+const POSE_DIMS          = 3;
+const D                  = TOTAL_PIXEL_DIMS + POSE_DIMS + 1; // bias
+const POSE_SCALE         = 1.0;
+const LAMBDA             = Math.pow(10, -0.3); // ≈0.5, same default
+
+const LEFT_IDX  = { outer: 33,  inner: 133, top: 159, bot: 145, pupil: 468 };
+const RIGHT_IDX = { inner: 362, outer: 263, top: 386, bot: 374, pupil: 473 };
+
+const WARMUP_CLICKS = 8;
+const MATCH_ROUNDS  = 12;
+
+const BINS = 5;
+const YAW_HALF   = 40 * Math.PI / 180;
+const PITCH_HALF = 30 * Math.PI / 180;
+
+/* =================================================================
+ * State
+ * ================================================================= */
+let faceLandmarker = null;
+let lastVideoTime  = -1;
+
+let curFeat = null;            // Float32Array(D)
+let curPose = null;            // {yaw, pitch, roll}
+let oursReady = false;
+
+// Ridge regression weights for ours
+let wx = null, wy = null;      // Float32Array(D)
+const ourSamples = { X: [], ys: [], yt: [] };
+
+// WebGazer live prediction — updated by setGazeListener at ~30 Hz
+let wgLastXY = null;
+
+// Match state machine
+// "CALIBRATING" | "TRANSITION" | "MATCH" | "SUMMARY"
+let phase = "CALIBRATING";
+let warmupCount = 0;
+let roundIdx    = 0;           // 0..11
+let matchTargets = [];         // precomputed [{x,y}, ...]
+
+// Per-round logs during match
+const matchLog = {
+  rounds: [],                  // { target, ours, wg, distOurs, distWg, winner, pose }
+  oursBins: makeBins(),
+  wgBins:   makeBins(),
+  oursWins: 0,
+  wgWins:   0,
+  ties:     0,
+};
+
+function makeBins() {
+  const b = new Array(BINS * BINS);
+  for (let i = 0; i < b.length; i++) b[i] = { sum: 0, n: 0 };
+  return b;
+}
+function binIdx(yaw, pitch) {
+  const fx = Math.max(0, Math.min(0.9999, (yaw   + YAW_HALF)   / (2 * YAW_HALF)));
+  const fy = Math.max(0, Math.min(0.9999, (pitch + PITCH_HALF) / (2 * PITCH_HALF)));
+  return Math.floor(fy * BINS) * BINS + Math.floor(fx * BINS);
+}
+
+/* =================================================================
+ * Setup — camera, MediaPipe, WebGazer
+ * ================================================================= */
+async function setup() {
+  // Our camera + MediaPipe FaceLandmarker
+  const fileset = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+  );
+  faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      delegate: "GPU",
+    },
+    outputFaceBlendshapes: false,
+    outputFacialTransformationMatrixes: true,
+    runningMode: "VIDEO",
+    numFaces: 1,
+  });
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: 1280, height: 720 }, audio: false,
+  });
+  video.srcObject = stream;
+  videoPreview.srcObject = stream;
+  await new Promise((r) => (video.onloadedmetadata = r));
+  await video.play();
+  await videoPreview.play().catch(() => {});
+
+  // --- WebGazer setup ---
+  // Point it at the vendored mediapipe assets *before* begin().
+  if (window.webgazer) {
+    webgazer.params.faceMeshSolutionPath = "./vendor/webgazer/www/mediapipe/face_mesh";
+
+    await webgazer
+      .setRegression("ridge")
+      .setGazeListener((data /*, clock */) => {
+        if (data) wgLastXY = { x: data.x, y: data.y };
+      })
+      .saveDataAcrossSessions(false)
+      .showVideoPreview(false)
+      .showPredictionPoints(false)
+      .begin();
+
+    // Kill WG's own click + mousemove training. We drive it manually so
+    // (a) no mousemove trail noise, (b) we can snapshot its prediction
+    // *before* it trains on the click.
+    webgazer.removeMouseEventListeners();
+  } else {
+    console.warn("webgazer failed to load — WG cursor will stay blank");
+  }
+
+  loading.remove();
+  startMatchLifecycle();
+  requestAnimationFrame(loop);
+}
+
+/* =================================================================
+ * Match lifecycle
+ * ================================================================= */
+function startMatchLifecycle() {
+  phase = "CALIBRATING";
+  warmupCount = 0;
+  showBanner("calibrating", `${warmupCount} / ${WARMUP_CLICKS}`,
+             "click the dot while looking at it — seeds both models");
+  placeCalibrationDot();
+}
+
+function beginMatch() {
+  phase = "MATCH";
+  hideBanner();
+  roundIdx = 0;
+  matchTargets = generateTargets(MATCH_ROUNDS);
+  matchLog.rounds.length = 0;
+  matchLog.oursBins = makeBins();
+  matchLog.wgBins   = makeBins();
+  matchLog.oursWins = 0;
+  matchLog.wgWins   = 0;
+  matchLog.ties     = 0;
+  updateHUD();
+  placeTarget(matchTargets[roundIdx]);
+}
+
+function endMatch() {
+  phase = "SUMMARY";
+  target.classList.remove("visible");
+  renderSummary();
+  summary.classList.add("visible");
+}
+
+function newMatch() {
+  // Keep calibration. Just play another 12 rounds.
+  summary.classList.remove("visible");
+  beginMatch();
+}
+
+function resetAll() {
+  // Wipe both models' calibration + match state.
+  wx = null; wy = null;
+  ourSamples.X.length  = 0;
+  ourSamples.ys.length = 0;
+  ourSamples.yt.length = 0;
+  try { webgazer.clearData(); } catch (e) { /* ok pre-begin */ }
+  summary.classList.remove("visible");
+  startMatchLifecycle();
+}
+
+/* Target positions: 4×3 grid with ±6% jitter, shuffled.
+ * Avoids HUD/PiP corners by insetting ~8% on the edges. */
+function generateTargets(n) {
+  const cols = 4, rows = 3;
+  const out = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const fx = 0.10 + (c / (cols - 1)) * 0.80 + (Math.random() - 0.5) * 0.06;
+      const fy = 0.18 + (r / (rows - 1)) * 0.66 + (Math.random() - 0.5) * 0.06;
+      out.push({
+        x: Math.round(fx * window.innerWidth),
+        y: Math.round(fy * window.innerHeight),
+      });
+    }
+  }
+  // Fisher–Yates shuffle
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out.slice(0, n);
+}
+
+function placeTarget(pt) {
+  target.style.left = pt.x + "px";
+  target.style.top  = pt.y + "px";
+  target.classList.add("visible");
+}
+
+function placeCalibrationDot() {
+  // During warm-up, drop a single dot somewhere random (re-placed each click).
+  const pad = 0.14;
+  const x = (pad + Math.random() * (1 - 2 * pad)) * window.innerWidth;
+  const y = (pad + Math.random() * (1 - 2 * pad)) * window.innerHeight;
+  placeTarget({ x, y });
+}
+
+function showBanner(title, big, sub) {
+  bannerTitle.textContent = title;
+  bannerCount.textContent = big;
+  banner.querySelector(".sub").textContent = sub;
+  banner.classList.add("visible");
+}
+function hideBanner() { banner.classList.remove("visible"); }
+
+/* =================================================================
+ * Main render loop — feature extraction + live cursors
+ * ================================================================= */
+function loop() {
+  const now = performance.now();
+  if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const res = faceLandmarker.detectForVideo(video, now);
+    computeFeatures(res);
+    predictAndDrawOurs();
+  }
+  drawWG();
+  requestAnimationFrame(loop);
+}
+
+function computeFeatures(res) {
+  const lm = res.faceLandmarks && res.faceLandmarks[0];
+  if (!lm) { curFeat = null; return; }
+
+  const W = video.videoWidth, H = video.videoHeight;
+  extractRectifiedPatch(lm, LEFT_IDX,  pLctx, W, H);
+  extractRectifiedPatch(lm, RIGHT_IDX, pRctx, W, H);
+
+  const feat = new Float32Array(D);
+  const dataL = pLctx.getImageData(0, 0, PATCH_W, PATCH_H).data;
+  const dataR = pRctx.getImageData(0, 0, PATCH_W, PATCH_H).data;
+  const inv255 = 1 / 255;
+  for (let i = 0, j = 0; i < dataL.length; i += 4, j++) {
+    feat[j] = (dataL[i] * 0.299 + dataL[i + 1] * 0.587 + dataL[i + 2] * 0.114) * inv255;
+  }
+  for (let i = 0, j = PIXEL_DIMS_PER_EYE; i < dataR.length; i += 4, j++) {
+    feat[j] = (dataR[i] * 0.299 + dataR[i + 1] * 0.587 + dataR[i + 2] * 0.114) * inv255;
+  }
+
+  const m = res.facialTransformationMatrixes && res.facialTransformationMatrixes[0];
+  curPose = m ? matrixToEuler(m) : { yaw: 0, pitch: 0, roll: 0 };
+
+  yawEl.textContent   = (curPose.yaw   * 180 / Math.PI).toFixed(1) + "°";
+  pitchEl.textContent = (curPose.pitch * 180 / Math.PI).toFixed(1) + "°";
+  rollEl.textContent  = (curPose.roll  * 180 / Math.PI).toFixed(1) + "°";
+
+  const PI_Q = Math.PI / 4;
+  feat[TOTAL_PIXEL_DIMS]     = (curPose.yaw   / PI_Q) * POSE_SCALE;
+  feat[TOTAL_PIXEL_DIMS + 1] = (curPose.pitch / PI_Q) * POSE_SCALE;
+  feat[TOTAL_PIXEL_DIMS + 2] = (curPose.roll  / PI_Q) * POSE_SCALE;
+  feat[TOTAL_PIXEL_DIMS + 3] = 1;
+
+  curFeat = feat;
+}
+
+function extractRectifiedPatch(lm, idx, ctx, W, H) {
+  const p = (i) => ({ x: lm[i].x * W, y: lm[i].y * H });
+  const a = p(idx.outer), b = p(idx.inner);
+  const [from, to] = a.x < b.x ? [a, b] : [b, a];
+  const midX = (from.x + to.x) / 2;
+  const midY = (from.y + to.y) / 2;
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const eyeLen = Math.hypot(dx, dy);
+  const angle  = Math.atan2(dy, dx);
+  const inset = 4;
+  const targetLen = PATCH_W - 2 * inset;
+  const scale = targetLen / eyeLen;
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, PATCH_W, PATCH_H);
+  ctx.translate(PATCH_W / 2, PATCH_H / 2);
+  ctx.scale(scale, scale);
+  ctx.rotate(-angle);
+  ctx.translate(-midX, -midY);
+  ctx.drawImage(video, 0, 0);
+  ctx.restore();
+}
+
+function matrixToEuler(mat) {
+  const m = mat.data;
+  const sy = Math.sqrt(m[0] * m[0] + m[1] * m[1]);
+  const singular = sy < 1e-6;
+  let x, y, z;
+  if (!singular) {
+    x = Math.atan2(m[6], m[10]);
+    y = Math.atan2(-m[2], sy);
+    z = Math.atan2(m[1], m[0]);
+  } else {
+    x = Math.atan2(-m[9], m[5]);
+    y = Math.atan2(-m[2], sy);
+    z = 0;
+  }
+  return { pitch: x, yaw: y, roll: z };
+}
+
+function dot(a, b) {
+  let s = 0;
+  const n = a.length;
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s;
+}
+
+function predictAndDrawOurs() {
+  if (curFeat && wx && wy) {
+    const px = dot(curFeat, wx);
+    const py = dot(curFeat, wy);
+    cursorOurs.style.left = px + "px";
+    cursorOurs.style.top  = py + "px";
+    cursorOurs.classList.add("visible");
+  } else {
+    cursorOurs.classList.remove("visible");
+  }
+}
+
+function drawWG() {
+  if (wgLastXY) {
+    cursorWG.style.left = wgLastXY.x + "px";
+    cursorWG.style.top  = wgLastXY.y + "px";
+    cursorWG.classList.add("visible");
+  } else {
+    cursorWG.classList.remove("visible");
+  }
+}
+
+/* =================================================================
+ * Click → snapshot, score, train, advance
+ * ================================================================= */
+document.addEventListener("click", (e) => {
+  // Ignore clicks on UI chrome
+  if (e.target && e.target.closest(".hud, .pip, .info, .legend, .summary, .banner"))
+    return;
+  if (!curFeat) return;
+  // Ignore clicks during the brief post-warm-up / post-match transitions.
+  if (phase !== "CALIBRATING" && phase !== "MATCH") return;
+
+  // STEP 1 — snapshot both predictions *before* either model sees this click.
+  // WebGazer records the click synchronously on recordScreenPosition, so
+  // wgLastXY here is the pre-training prediction. Same for ours: wx/wy
+  // won't update until we call refitOurs().
+  const oursPred = (wx && wy)
+    ? { x: dot(curFeat, wx), y: dot(curFeat, wy) }
+    : null;
+  const wgPred = wgLastXY ? { x: wgLastXY.x, y: wgLastXY.y } : null;
+  const tgt = { x: e.clientX, y: e.clientY };
+
+  // STEP 2 — train both models on this click.
+  try { webgazer.recordScreenPosition(tgt.x, tgt.y, "click"); } catch (err) {}
+  addOurSample(tgt);
+
+  // STEP 3 — update phase state.
+  if (phase === "CALIBRATING") {
+    warmupCount++;
+    if (warmupCount >= WARMUP_CLICKS) {
+      // Brief "starting match" flash
+      phase = "TRANSITION";
+      target.classList.remove("visible");
+      bannerCount.textContent = "go";
+      bannerTitle.textContent = "match starting";
+      banner.querySelector(".sub").textContent = `${MATCH_ROUNDS} rounds — click each target while looking at it`;
+      setTimeout(beginMatch, 700);
+    } else {
+      bannerCount.textContent = `${warmupCount} / ${WARMUP_CLICKS}`;
+      placeCalibrationDot();
+    }
+    fireClickFlash(tgt);
+    return;
+  }
+
+  if (phase === "MATCH") {
+    // Log the round.
+    scoreRound(tgt, oursPred, wgPred);
+    fireClickFlash(tgt);
+    flashArrows(oursPred, wgPred, tgt);
+    bumpRoundReadout();
+
+    roundIdx++;
+    updateHUD();
+    if (roundIdx >= MATCH_ROUNDS) {
+      phase = "TRANSITION";
+      target.classList.remove("visible");
+      setTimeout(endMatch, 450);
+    } else {
+      placeTarget(matchTargets[roundIdx]);
+    }
+    return;
+  }
+}, true);
+
+function addOurSample(tgt) {
+  const f = new Float32Array(curFeat);
+  ourSamples.X.push(f);
+  ourSamples.ys.push(tgt.x);
+  ourSamples.yt.push(tgt.y);
+  if (ourSamples.X.length >= 8) refitOurs();
+}
+
+function scoreRound(tgt, oursPred, wgPred) {
+  const distOurs = oursPred ? Math.hypot(oursPred.x - tgt.x, oursPred.y - tgt.y) : null;
+  const distWg   = wgPred   ? Math.hypot(wgPred.x   - tgt.x, wgPred.y   - tgt.y) : null;
+
+  // Tie-break in WG's favour, per spec. Use strict < for ours to win.
+  let winner = "tie";
+  if (distOurs != null && distWg != null) {
+    if      (distOurs <  distWg) winner = "ours";
+    else if (distOurs >  distWg) winner = "wg";
+    else                         winner = "wg"; // tie → WG
+  } else if (distOurs != null)   winner = "ours";
+  else if (distWg != null)       winner = "wg";
+
+  if      (winner === "ours") matchLog.oursWins++;
+  else if (winner === "wg")   matchLog.wgWins++;
+  else                        matchLog.ties++;
+
+  // Heatmap bins (same pose-binning as reference impl)
+  if (curPose) {
+    const bi = binIdx(curPose.yaw, curPose.pitch);
+    if (distOurs != null) { matchLog.oursBins[bi].sum += distOurs; matchLog.oursBins[bi].n++; }
+    if (distWg   != null) { matchLog.wgBins[bi].sum   += distWg;   matchLog.wgBins[bi].n++;   }
+  }
+
+  matchLog.rounds.push({
+    target: tgt, ours: oursPred, wg: wgPred,
+    distOurs, distWg, winner,
+    pose: curPose ? { ...curPose } : null,
+  });
+}
+
+/* =================================================================
+ * Ridge regression (dual, same as rectified-reg)
+ *   w = X^T (X X^T + λI)^-1 y
+ * ================================================================= */
+function refitOurs() {
+  const n = ourSamples.X.length;
+  if (n < 4) return;
+  const d = ourSamples.X[0].length;
+
+  const K = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) {
+    const xi = ourSamples.X[i];
+    for (let j = i; j < n; j++) {
+      const xj = ourSamples.X[j];
+      let s = 0;
+      for (let k = 0; k < d; k++) s += xi[k] * xj[k];
+      K[i * n + j] = s;
+      K[j * n + i] = s;
+    }
+  }
+  for (let i = 0; i < n; i++) K[i * n + i] += LAMBDA;
+
+  const yx = Float64Array.from(ourSamples.ys);
+  const yt = Float64Array.from(ourSamples.yt);
+  const Kc1 = new Float64Array(K);
+  const ax  = gaussSolve(Kc1, yx, n);
+  const Kc2 = new Float64Array(K);
+  const ay  = gaussSolve(Kc2, yt, n);
+  if (!ax || !ay) return;
+
+  const wxN = new Float32Array(d);
+  const wyN = new Float32Array(d);
+  for (let i = 0; i < n; i++) {
+    const xi = ourSamples.X[i];
+    const cx = ax[i], cy = ay[i];
+    for (let k = 0; k < d; k++) {
+      wxN[k] += xi[k] * cx;
+      wyN[k] += xi[k] * cy;
+    }
+  }
+  wx = wxN; wy = wyN;
+  oursReady = true;
+}
+
+function gaussSolve(A, b, n) {
+  const x = new Float64Array(b);
+  for (let i = 0; i < n; i++) {
+    let p = i, pv = Math.abs(A[i * n + i]);
+    for (let r = i + 1; r < n; r++) {
+      const v = Math.abs(A[r * n + i]);
+      if (v > pv) { pv = v; p = r; }
+    }
+    if (pv < 1e-10) return null;
+    if (p !== i) {
+      for (let c = i; c < n; c++) {
+        const t = A[i * n + c]; A[i * n + c] = A[p * n + c]; A[p * n + c] = t;
+      }
+      const t = x[i]; x[i] = x[p]; x[p] = t;
+    }
+    const piv = A[i * n + i];
+    for (let r = i + 1; r < n; r++) {
+      const f = A[r * n + i] / piv;
+      if (f === 0) continue;
+      for (let c = i; c < n; c++) A[r * n + c] -= f * A[i * n + c];
+      x[r] -= f * x[i];
+    }
+  }
+  const out = new Float64Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    let s = x[i];
+    for (let c = i + 1; c < n; c++) s -= A[i * n + c] * out[c];
+    out[i] = s / A[i * n + i];
+  }
+  return out;
+}
+
+/* =================================================================
+ * HUD + effects
+ * ================================================================= */
+function updateHUD() {
+  roundN.textContent = Math.min(roundIdx + 1, MATCH_ROUNDS);
+  oursWins.textContent = matchLog.oursWins;
+  wgWins.textContent   = matchLog.wgWins;
+
+  if (matchLog.oursWins === matchLog.wgWins) {
+    leadText.innerHTML = `<span style="color:var(--muted)">tied</span>`;
+  } else if (matchLog.oursWins > matchLog.wgWins) {
+    leadText.innerHTML = `<span>ours +${matchLog.oursWins - matchLog.wgWins}</span>`;
+  } else {
+    leadText.innerHTML = `<span style="color:var(--wg)">wg +${matchLog.wgWins - matchLog.oursWins}</span>`;
+  }
+
+  const last = matchLog.rounds[matchLog.rounds.length - 1];
+  if (last) {
+    lastOursEl.textContent = last.distOurs != null ? `${last.distOurs.toFixed(0)} px` : "—";
+    lastWgEl.textContent   = last.distWg   != null ? `${last.distWg.toFixed(0)} px`   : "—";
+  } else {
+    lastOursEl.textContent = "—";
+    lastWgEl.textContent   = "—";
+  }
+}
+
+function bumpRoundReadout() {
+  roundReadout.classList.add("bump");
+  setTimeout(() => roundReadout.classList.remove("bump"), 180);
+}
+
+function fireClickFlash(pt) {
+  clickFlash.style.left = pt.x + "px";
+  clickFlash.style.top  = pt.y + "px";
+  clickFlash.classList.remove("fire");
+  // reflow to restart animation
+  void clickFlash.offsetWidth;
+  clickFlash.classList.add("fire");
+}
+
+function flashArrows(oursPred, wgPred, tgt) {
+  if (oursPred) {
+    arrowOurs.setAttribute("x1", oursPred.x);
+    arrowOurs.setAttribute("y1", oursPred.y);
+    arrowOurs.setAttribute("x2", tgt.x);
+    arrowOurs.setAttribute("y2", tgt.y);
+    arrowOurs.classList.add("flash");
+  }
+  if (wgPred) {
+    arrowWG.setAttribute("x1", wgPred.x);
+    arrowWG.setAttribute("y1", wgPred.y);
+    arrowWG.setAttribute("x2", tgt.x);
+    arrowWG.setAttribute("y2", tgt.y);
+    arrowWG.classList.add("flash");
+  }
+  setTimeout(() => {
+    arrowOurs.classList.remove("flash");
+    arrowWG.classList.remove("flash");
+  }, 520);
+}
+
+/* =================================================================
+ * Summary rendering
+ * ================================================================= */
+function renderSummary() {
+  let sqOurs = 0, sqWg = 0, nO = 0, nW = 0, losses = { ours: 0, wg: 0 };
+  for (const r of matchLog.rounds) {
+    if (r.distOurs != null) { sqOurs += r.distOurs * r.distOurs; nO++; }
+    if (r.distWg   != null) { sqWg   += r.distWg   * r.distWg;   nW++; }
+    if (r.winner === "ours") losses.wg++;
+    if (r.winner === "wg")   losses.ours++;
+  }
+  const rmseOurs = nO ? Math.sqrt(sqOurs / nO) : null;
+  const rmseWg   = nW ? Math.sqrt(sqWg   / nW) : null;
+
+  oursRmseEl.textContent = rmseOurs != null ? `${rmseOurs.toFixed(0)} px` : "—";
+  wgRmseEl.textContent   = rmseWg   != null ? `${rmseWg.toFixed(0)} px`   : "—";
+
+  const oursLosses = losses.ours; // rounds where WG won
+  const wgLosses   = losses.wg;   // rounds where ours won
+  oursRecord.textContent = `${matchLog.oursWins} W · ${matchLog.ties} T · ${oursLosses} L`;
+  wgRecord.textContent   = `${matchLog.wgWins} W · ${matchLog.ties} T · ${wgLosses} L`;
+
+  // Winner logic: use RMSE as the headline — it's the continuous measure.
+  // Fall back to wins if RMSE is missing.
+  let winner;
+  if (rmseOurs != null && rmseWg != null) {
+    winner = rmseOurs < rmseWg ? "ours" : (rmseOurs > rmseWg ? "wg" : "wg"); // tie → wg
+  } else if (rmseOurs != null) winner = "ours";
+  else if (rmseWg != null)     winner = "wg";
+  else                         winner = "tie";
+
+  oursRmseEl.classList.toggle("win", winner === "ours");
+  wgRmseEl.classList.toggle("win",   winner === "wg");
+
+  if (winner === "ours") {
+    winnerName.textContent = "Ours";
+    winnerName.classList.remove("wg");
+    winnerSuffix.textContent = " takes the match";
+  } else if (winner === "wg") {
+    winnerName.textContent = "WebGazer";
+    winnerName.classList.add("wg");
+    winnerSuffix.textContent = " takes the match";
+  } else {
+    winnerName.textContent = "Tie";
+    winnerName.classList.remove("wg");
+    winnerSuffix.textContent = "";
+  }
+
+  // Shared color scale across both heatmaps.
+  let maxErr = 1;
+  for (const b of matchLog.oursBins) if (b.n) maxErr = Math.max(maxErr, b.sum / b.n);
+  for (const b of matchLog.wgBins)   if (b.n) maxErr = Math.max(maxErr, b.sum / b.n);
+
+  drawHeatmap(hmOursCanvas, matchLog.oursBins, maxErr);
+  drawHeatmap(hmWgCanvas,   matchLog.wgBins,   maxErr);
+}
+
+function drawHeatmap(canvas, bins, maxErr) {
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  const cw = W / BINS, ch = H / BINS;
+  for (let y = 0; y < BINS; y++) {
+    for (let x = 0; x < BINS; x++) {
+      const b = bins[(BINS - 1 - y) * BINS + x];
+      if (!b.n) {
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+      } else {
+        const t = Math.min(1, (b.sum / b.n) / maxErr);
+        const hue   = (1 - t) * 135;
+        const light = 45 + (1 - t) * 10;
+        ctx.fillStyle = `hsl(${hue.toFixed(0)}, 70%, ${light.toFixed(0)}%)`;
+      }
+      ctx.fillRect(x * cw, y * ch, cw - 1, ch - 1);
+    }
+  }
+}
+
+/* =================================================================
+ * Controls — buttons + keyboard
+ * ================================================================= */
+document.getElementById("btn-new-match").addEventListener("click", newMatch);
+document.getElementById("btn-reset-all").addEventListener("click", resetAll);
+
+document.addEventListener("keydown", (e) => {
+  if (e.target.matches("input,textarea,select")) return;
+  if (e.key === "n" || e.key === "N") {
+    if (phase === "SUMMARY") newMatch();
+    else beginMatch();           // skip warm-up, go straight in
+  } else if (e.key === "r" || e.key === "R") {
+    resetAll();
+  }
+});
+
+// Reposition active target on resize so it never lands offscreen.
+window.addEventListener("resize", () => {
+  if (phase === "MATCH" && matchTargets[roundIdx]) {
+    // Re-project original fractional position — cheaper to just clamp:
+    const t = matchTargets[roundIdx];
+    t.x = Math.min(Math.max(t.x, 40), window.innerWidth  - 40);
+    t.y = Math.min(Math.max(t.y, 40), window.innerHeight - 40);
+    placeTarget(t);
+  }
+});
+
+/* =================================================================
+ * Kick off
+ * ================================================================= */
+setup().catch((err) => {
+  loading.textContent = "setup failed: " + (err && err.message || err);
+  console.error(err);
+});
+</script>
+</body>
+</html>

@@ -84,11 +84,53 @@ Open <http://localhost:8765/index-v2.html>. In the sidebar, scroll to
   9-point flow in the sidebar, or just leave "Learn from clicks" on and
   use the page normally — it gets noticeably better after ~20 clicks.
 
+## Gaze Duel (`index-duel.html`)
+
+Head-to-head 12-round comparison between **our** gaze model (rectified
+40×20 eye patches + yaw/pitch/roll features, dual-form ridge regression —
+ported from `index-rectified-reg.html`) and **WebGazer** (axis-aligned
+60×10 patches, ridge regression). Both models run concurrently on the
+same camera, train on the same clicks, and at each click snapshot their
+prediction *before* receiving that click as a training sample — so the
+per-round score is a held-out measurement.
+
+Open `http://localhost:8765/index-duel.html` after starting
+`python3 -m http.server 8765`. First 8 clicks seed both models
+(a banner counts them down), then a match runs 12 targets drawn from a
+4×3 grid with jitter. The summary card shows cumulative RMSE, round
+record, a yaw × pitch error heatmap per model (shared colour scale), and
+a trophy. Hotkeys: <kbd>N</kbd> new match, <kbd>R</kbd> reset (clears
+both models — calls `webgazer.clearData()` under the hood).
+
+### Why the WebGazer bundle is vendored
+
+The duel loads WebGazer from `vendor/webgazer/www/webgazer.js` plus the
+MediaPipe face-mesh assets under `vendor/webgazer/www/mediapipe/`. Those
+files are cherry-picked from the `webgazer-demo` branch rather than
+fetched from jsdelivr at runtime because:
+
+1. **Offline / LAN reliability** — the demo works with no outbound
+   network once loaded.
+2. **Version pinning** — the bundle captured on `webgazer-demo` is
+   known-compatible with the API calls we use here. CDN drift (jsdelivr
+   serving a newer build) could silently change behaviour like the
+   default Kalman filter or the face-mesh runtime.
+3. **MediaPipe asset URLs are not trivially overridable from a CDN
+   build** — WebGazer uses `params.faceMeshSolutionPath` (default
+   `./mediapipe/face_mesh`). Hosting the assets ourselves lets us point
+   that param at a local path without patching the bundle.
+
+Our own model's MediaPipe Tasks Vision build still loads from jsdelivr
+(`@mediapipe/tasks-vision@0.10.9`) to match the other demos in this repo.
+
 ## Project structure
 
 ```
-index.html         # v1 — browser-only tracking + cursors
-index-v2.html      # v2 — adds WebSocket client that talks to the bridge
-server.py          # v2 — local Python bridge (Quartz + websockets)
-requirements.txt   # Python deps for the bridge
+index.html                # v1 — browser-only tracking + cursors
+index-v2.html             # v2 — adds WebSocket client that talks to the bridge
+index-rectified-reg.html  # rectified + pose gaze regression reference
+index-duel.html           # ours vs WebGazer head-to-head
+server.py                 # v2 — local Python bridge (Quartz + websockets)
+requirements.txt          # Python deps for the bridge
+vendor/webgazer/          # pinned WebGazer bundle + MediaPipe assets
 ```
