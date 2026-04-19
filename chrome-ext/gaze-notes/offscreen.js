@@ -97,13 +97,33 @@ async function setup() {
     numFaces: 1,
   });
 
+  console.log("[gaze-notes] requesting camera…");
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { width: 640, height: 480 },
     audio: false,
   });
+  console.log("[gaze-notes] camera ok, attaching stream");
   video.srcObject = stream;
   await new Promise((r) => (video.onloadedmetadata = r));
+  console.log("[gaze-notes] video metadata loaded",
+    { w: video.videoWidth, h: video.videoHeight, state: video.readyState });
   await video.play();
+  console.log("[gaze-notes] video.play() resolved", {
+    paused: video.paused, currentTime: video.currentTime,
+  });
+
+  // Heartbeat: every 2s, dump counters so we can see whether the loop is
+  // actually ticking and whether frames are being processed.
+  setInterval(() => {
+    console.log("[gaze-notes] heartbeat", {
+      framesSeen,
+      faceFramesSeen,
+      videoReady: video.readyState,
+      videoTime: video.currentTime,
+      paused: video.paused,
+      samples: samples.X.length,
+    });
+  }, 2000);
 
   requestAnimationFrame(loop);
 }
