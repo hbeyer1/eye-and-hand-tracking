@@ -88,10 +88,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.from === "content") {
       if (msg.type === "click") {
+        console.log("[gaze-notes/sw] click from content → fanning out", msg);
         chrome.runtime.sendMessage({
           from: "bg", type: "addSample",
           nx: msg.nx, ny: msg.ny,
-        }).catch(() => {});
+        }).then(() => console.log("[gaze-notes/sw] addSample dispatched"))
+          .catch((err) => console.warn("[gaze-notes/sw] addSample failed", err));
       } else if (msg.type === "ready") {
         // Content script is hooked up — reply with debug flag
         const state = await loadState();

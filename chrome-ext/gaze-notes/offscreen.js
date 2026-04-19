@@ -342,8 +342,12 @@ function gaussSolve(A, b, n) {
 // ============================================================
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.from === "bg" && msg.type === "addSample") {
+    console.log("[gaze-notes/offscreen] addSample received", msg);
     lastClickAt = Date.now();
-    if (!curFeat) return;
+    if (!curFeat) {
+      console.warn("[gaze-notes/offscreen] skipping — no curFeat");
+      return;
+    }
     // Predict-before-train for online eval
     if (wx && wy) {
       const pnx = clamp01(dot(curFeat, wx));

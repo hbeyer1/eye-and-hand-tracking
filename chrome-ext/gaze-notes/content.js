@@ -43,9 +43,12 @@
     if (e.target && e.target.id === DOT_ID) return;
     const nx = e.clientX / window.innerWidth;
     const ny = e.clientY / window.innerHeight;
+    console.log("[gaze-notes/content] click → SW", { nx, ny });
     chrome.runtime.sendMessage({ from: "content", type: "click", nx, ny })
-      .catch(() => {}); // extension may be reloading
+      .then(() => console.log("[gaze-notes/content] SW ack"))
+      .catch((err) => console.warn("[gaze-notes/content] send failed", err));
   }, true);
+  console.log("[gaze-notes/content] click listener installed on", location.href);
 
   // Listen for pushed messages from the service worker
   chrome.runtime.onMessage.addListener((msg) => {
