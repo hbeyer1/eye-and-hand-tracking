@@ -125,13 +125,16 @@ async function setup() {
     });
   }, 2000);
 
-  requestAnimationFrame(loop);
+  // ~30 Hz tick
+  setInterval(tick, 33);
 }
 
 // ============================================================
 // Main loop: detect face, build features, predict, broadcast
 // ============================================================
-function loop() {
+// Offscreen documents aren't painted, so requestAnimationFrame doesn't
+// fire reliably. Drive the loop with setInterval (~30 Hz) instead.
+function tick() {
   const now = performance.now();
   if (video.readyState >= 2 && video.currentTime !== lastTime) {
     lastTime = video.currentTime;
@@ -145,7 +148,6 @@ function loop() {
       sendStats();
     }
   }
-  requestAnimationFrame(loop);
 }
 
 // ============================================================
